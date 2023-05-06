@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
         let shutdown = shutdown.clone();
         std::thread::spawn(move || {
             let mut forward_signals =
-                Signals::new(&[SIGINT, SIGTERM]).expect("unable to watch for signals");
+                Signals::new([SIGINT, SIGTERM]).expect("unable to watch for signals");
 
             for signal in forward_signals.forever() {
                 info!("got signal {signal}, shutting down...");

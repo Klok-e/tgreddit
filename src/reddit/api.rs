@@ -92,7 +92,7 @@ pub async fn get_subreddit_about(subreddit: &str) -> Result<SubredditAbout, Subr
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let url = get_base_url().join(&format!("/r/{subreddit}/about.json"))?;
-    let res = client.get(url).send().await?;
+    let res = client.get(url).send().await?.error_for_status()?;
 
     match res.status() {
         reqwest::StatusCode::FOUND => Err(SubredditAboutError::NoSuchSubreddit),

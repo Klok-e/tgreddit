@@ -114,7 +114,7 @@ pub async fn handle_command(
                             .await?;
                     }
                     Err(err) => {
-                        Err(err)?;
+                        Err(err).context("Couldn't download about.json for subreddit")?;
                     }
                 }
             }
@@ -178,7 +178,7 @@ pub async fn handle_command(
     }
 
     if let Err(err) = handle(&message, &tg, command, config).await {
-        error!("failed to handle message: {}", err);
+        error!("failed to handle message: {:?}", err);
         tg.send_message(message.chat.id, "Something went wrong")
             .await?;
     }
