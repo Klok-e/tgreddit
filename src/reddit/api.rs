@@ -58,7 +58,7 @@ pub async fn get_subreddit_top_posts(
 pub async fn get_link(link_id: &str) -> Result<Post> {
     info!("getting link id {link_id}");
     let url = get_base_url().join("/api/info.json")?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let res = client
         .get(url)
         .query(&[("id", &format!("t3_{link_id}"))])
