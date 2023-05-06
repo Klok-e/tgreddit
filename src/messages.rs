@@ -37,8 +37,11 @@ pub fn format_media_caption_html(post: &reddit::Post, links_base_url: Option<&st
     format!("{title}\n{meta}")
 }
 
-pub fn format_repost_callback_data(caption: &String) -> String {
-    format!("{caption}")
+pub fn format_repost_buttons(caption: &String) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::default().append_row([
+        InlineKeyboardButton::callback("Post to channel", format!("{caption}")),
+        InlineKeyboardButton::callback("Post to channel (no title)", ""),
+    ])
 }
 
 pub fn format_link_message_html(post: &reddit::Post, links_base_url: Option<&str>) -> String {

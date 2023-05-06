@@ -125,12 +125,7 @@ async fn handle_new_video_post(
         .caption(&caption)
         .height(video.height.into())
         .width(video.width.into())
-        .reply_markup(
-            InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
-                "Post to channel",
-                messages::format_repost_callback_data(&post.title),
-            )]),
-        )
+        .reply_markup(messages::format_repost_buttons(&post.title))
         .await?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
@@ -153,12 +148,7 @@ async fn handle_new_image_post(
             tg.send_photo(ChatId(chat_id), InputFile::file(path))
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .caption(&caption)
-                .reply_markup(InlineKeyboardMarkup::default().append_row([
-                    InlineKeyboardButton::callback(
-                        "Post to channel",
-                        messages::format_repost_callback_data(&post.title),
-                    ),
-                ]))
+                .reply_markup(messages::format_repost_buttons(&post.title))
                 .await?;
             info!("image uploaded post_id={} chat_id={chat_id}", post.id);
             Ok(())
@@ -180,12 +170,7 @@ async fn handle_new_link_post(
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .disable_web_page_preview(false)
-        .reply_markup(
-            InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
-                "Post to channel",
-                messages::format_repost_callback_data(&post.title),
-            )]),
-        )
+        .reply_markup(messages::format_repost_buttons(&post.title))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(())
@@ -201,12 +186,7 @@ async fn handle_new_self_post(
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .disable_web_page_preview(true)
-        .reply_markup(
-            InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
-                "Post to channel",
-                messages::format_repost_callback_data(&post.title),
-            )]),
-        )
+        .reply_markup(messages::format_repost_buttons(&post.title))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(())
