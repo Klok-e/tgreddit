@@ -5,6 +5,7 @@ use thiserror::Error;
 use url::Url;
 
 static REDDIT_BASE_URL: &str = "https://www.reddit.com";
+const USER_AGENT: &str = "Linux:tgreddit:0.1.0";
 
 fn get_base_url() -> Url {
     Url::parse(REDDIT_BASE_URL).unwrap()
@@ -38,7 +39,7 @@ pub async fn get_subreddit_top_posts(
     let url = get_base_url()
         .join(&format!("/r/{subreddit}/top.json"))
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
     let res = client
         .get(url)
         .query(&[
@@ -47,6 +48,7 @@ pub async fn get_subreddit_top_posts(
         ])
         .send()
         .await?
+        .error_for_status()?
         .json::<ListingResponse>()
         .await?;
     let posts = res.data.children.into_iter().map(|e| e.data).collect();
@@ -89,6 +91,7 @@ pub enum SubredditAboutError {
 pub async fn get_subreddit_about(subreddit: &str) -> Result<SubredditAbout, SubredditAboutError> {
     info!("getting subreddit about for /r/{subreddit}");
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let url = get_base_url().join(&format!("/r/{subreddit}/about.json"))?;

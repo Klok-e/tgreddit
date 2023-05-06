@@ -37,6 +37,10 @@ pub fn format_media_caption_html(post: &reddit::Post, links_base_url: Option<&st
     format!("{title}\n{meta}")
 }
 
+pub fn format_repost_callback_data(caption: &String) -> String {
+    format!("{caption}")
+}
+
 pub fn format_link_message_html(post: &reddit::Post, links_base_url: Option<&str>) -> String {
     let title = format_html_anchor(&post.url, &post.title);
     let meta = format_meta_html(post, links_base_url);

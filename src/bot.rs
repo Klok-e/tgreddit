@@ -24,6 +24,13 @@ pub enum Command {
     ListSubs,
     #[command(description = "get top posts", parse_with = "parse_subscribe_message")]
     Get(SubscriptionArgs),
+    #[command(description = "register channel to which the bot is supposed to post")]
+    RegisterChannel(i64),
+    #[command(description = "repost to the registered channel", parse_with = "split")]
+    RepostToChannel {
+        message_id: i32,
+        description: String,
+    },
 }
 
 pub struct MyBot {
@@ -36,15 +43,26 @@ impl MyBot {
         let tg = Arc::new(Bot::new(config.telegram_bot_token.expose_secret()).auto_send());
         tg.set_my_commands(Command::bot_commands()).await?;
 
-        let handler = Update::filter_message().branch(
-            dptree::filter(|msg: Message, config: Arc<config::Config>| {
-                msg.from()
-                    .map(|user| config.authorized_user_ids.contains(&user.id.0))
-                    .unwrap_or_default()
-            })
-            .filter_command::<Command>()
-            .endpoint(handle_command),
-        );
+        let handler = dptree::entry()
+            .branch(
+                Update::filter_message().branch(
+                    dptree::filter(|msg: Message, config: Arc<config::Config>| {
+                        msg.from()
+                            .map(|user| config.authorized_user_ids.contains(&user.id.0))
+                            .unwrap_or_default()
+                    })
+                    .filter_command::<Command>()
+                    .endpoint(handle_command),
+                ),
+            )
+            .branch(
+                Update::filter_callback_query().branch(
+                    dptree::filter(|msg: CallbackQuery, config: Arc<config::Config>| {
+                        config.authorized_user_ids.contains(&msg.from.id.0)
+                    })
+                    .endpoint(callback_handler),
+                ),
+            );
 
         let dispatcher = Dispatcher::builder(tg.clone(), handler)
             .dependencies(dptree::deps![config.clone()])
@@ -89,13 +107,13 @@ pub async fn handle_command(
         command: Command,
         config: Arc<config::Config>,
     ) -> Result<()> {
+        let db = db::Database::open(&config)?;
         match command {
             Command::Help => {
                 tg.send_message(message.chat.id, Command::descriptions().to_string())
                     .await?;
             }
             Command::Sub(mut args) => {
-                let db = db::Database::open(&config)?;
                 let chat_id = message.chat.id.0;
                 let subreddit_about = reddit::get_subreddit_about(&args.subreddit).await;
                 match subreddit_about {
@@ -119,7 +137,6 @@ pub async fn handle_command(
                 }
             }
             Command::Unsub(subreddit) => {
-                let db = db::Database::open(&config)?;
                 let chat_id = message.chat.id.0;
                 let subreddit = subreddit.replace("r/", "");
                 let reply = match db.unsubscribe(chat_id, &subreddit) {
@@ -129,48 +146,26 @@ pub async fn handle_command(
                 tg.send_message(ChatId(chat_id), reply).await?;
             }
             Command::ListSubs => {
-                let db = db::Database::open(&config)?;
                 let subs = db.get_subscriptions_for_chat(message.chat.id.0)?;
                 let reply = messages::format_subscription_list(&subs);
                 tg.send_message(message.chat.id, reply).await?;
             }
             Command::Get(args) => {
-                let subreddit = &args.subreddit;
-                let limit = args
-                    .limit
-                    .or(config.default_limit)
-                    .unwrap_or(config::DEFAULT_LIMIT);
-                let time = args
-                    .time
-                    .or(config.default_time)
-                    .unwrap_or(config::DEFAULT_TIME_PERIOD);
-                let filter = args.filter.or(config.default_filter);
-                let chat_id = message.chat.id.0;
-
-                let posts = reddit::get_subreddit_top_posts(subreddit, limit, &time)
-                    .await
-                    .context("failed to get posts")?
-                    .into_iter()
-                    .filter(|p| {
-                        if filter.is_some() {
-                            filter.as_ref() == Some(&p.post_type)
-                        } else {
-                            true
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                debug!("got {} post(s) for subreddit /r/{}", posts.len(), subreddit);
-
-                if !posts.is_empty() {
-                    for post in posts {
-                        if let Err(e) = handle_new_post(&config, tg, chat_id, &post).await {
-                            error!("failed to handle new post: {e}");
-                        }
-                    }
-                } else {
-                    tg.send_message(message.chat.id, "No posts found").await?;
-                }
+                handle_get_command(args, config, message, tg).await?;
+            }
+            Command::RegisterChannel(channel_id) => {
+                db.set_repost_channel(message.chat.id.0, channel_id)?;
+                tg.send_message(
+                    message.chat.id,
+                    format!("Repost channel {channel_id} added successfully"),
+                )
+                .await?;
+            }
+            Command::RepostToChannel {
+                description,
+                message_id,
+            } => {
+                handle_repost(db, message.chat.id, tg, message_id, description).await?;
             }
         };
 
@@ -183,6 +178,70 @@ pub async fn handle_command(
             .await?;
     }
 
+    Ok(())
+}
+
+async fn handle_repost(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &AutoSend<Bot>,
+    message_id: i32,
+    description: String,
+) -> Result<()> {
+    let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
+        tg.send_message(
+            chat_id,
+            format!("Repost channel not registered"),
+        )
+        .await?;
+        return Ok(());
+    };
+    tg.copy_message(ChatId(repost_channel_id), chat_id, message_id)
+        .caption(description)
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn handle_get_command(
+    args: SubscriptionArgs,
+    config: Arc<config::Config>,
+    message: &Message,
+    tg: &AutoSend<Bot>,
+) -> Result<(), anyhow::Error> {
+    let subreddit = &args.subreddit;
+    let limit = args
+        .limit
+        .or(config.default_limit)
+        .unwrap_or(config::DEFAULT_LIMIT);
+    let time = args
+        .time
+        .or(config.default_time)
+        .unwrap_or(config::DEFAULT_TIME_PERIOD);
+    let filter = args.filter.or(config.default_filter);
+    let chat_id = message.chat.id.0;
+    let posts = reddit::get_subreddit_top_posts(subreddit, limit, &time)
+        .await
+        .context("failed to get posts")?
+        .into_iter()
+        .filter(|p| {
+            if filter.is_some() {
+                filter.as_ref() == Some(&p.post_type)
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+    debug!("got {} post(s) for subreddit /r/{}", posts.len(), subreddit);
+    if !posts.is_empty() {
+        for post in posts {
+            if let Err(e) = handle_new_post(&config, tg, chat_id, &post).await {
+                error!("failed to handle new post: {e}");
+            }
+        }
+    } else {
+        tg.send_message(message.chat.id, "No posts found").await?;
+    };
     Ok(())
 }
 
@@ -239,6 +298,19 @@ fn parse_subscribe_message(input: String) -> Result<(SubscriptionArgs,), ParseEr
     };
 
     Ok((args,))
+}
+
+async fn callback_handler(
+    q: CallbackQuery,
+    config: Arc<config::Config>,
+    tg: Arc<AutoSend<Bot>>,
+) -> Result<()> {
+    let db = db::Database::open(&config)?;
+
+    let msg = q.message.expect("Message must exist");
+    handle_repost(db, msg.chat.id, &tg, msg.id, q.data.expect("Data expected")).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

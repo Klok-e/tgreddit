@@ -1,7 +1,10 @@
 use crate::{config::*, reddit::*, types::*};
 use anyhow::{Context, Result};
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef};
 use rusqlite::{named_params, Connection, Row};
+use rusqlite::{
+    types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef},
+    OptionalExtension,
+};
 use rusqlite_migration::{Migrations, M};
 use std::convert::TryFrom;
 use std::path::Path;
@@ -28,7 +31,40 @@ const MIGRATIONS: &[&str] = &[
         filter      text,
         primary key (subreddit, chat_id)
     ) strict;
-",
+    ",
+    "
+    create table chat(
+        chat_id     integer primary key,
+        repost_channel_id integer
+    ) strict;
+    ",
+    "
+    insert or ignore into chat (chat_id)
+    select chat_id from subscription;
+    ",
+    "
+    create table subscription_new(
+        chat_id     integer not null,
+        subreddit   text not null,
+        created_at  text not null,
+        post_limit  integer,
+        time        text,
+        filter      text,
+        primary key (subreddit, chat_id),
+        foreign key (chat_id) references chat(chat_id)
+    );
+    ",
+    "
+    insert into subscription_new
+    select * from subscription;
+    ",
+    "
+    drop table subscription;
+    ",
+    "
+    alter table subscription_new
+    rename to subscription;
+    ",
 ];
 
 #[derive(Debug)]
@@ -120,6 +156,8 @@ impl Database {
     }
 
     pub fn subscribe(&self, chat_id: i64, args: &SubscriptionArgs) -> Result<()> {
+        self.ensure_chat_exists(chat_id)?;
+
         let mut stmt = self.conn.prepare(
             "
             insert into subscription (chat_id, subreddit, post_limit, time, filter, created_at)
@@ -173,7 +211,6 @@ impl Database {
         Ok(deleted_subreddit)
     }
 
-    #[allow(dead_code)]
     pub fn get_subscriptions_for_chat(&self, chat_id: i64) -> Result<Vec<Subscription>> {
         let mut stmt = self.conn.prepare(
             "
@@ -203,6 +240,78 @@ impl Database {
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
 
         Ok(subs)
+    }
+
+    pub fn ensure_chat_exists(&self, chat_id: i64) -> Result<()> {
+        let chat_exists: bool = self.conn.query_row(
+            "
+            select exists(
+                select 1
+                from chat
+                where chat_id = :chat_id
+            );
+            ",
+            named_params! {
+                ":chat_id": chat_id,
+            },
+            |row| row.get(0),
+        )?;
+
+        if !chat_exists {
+            let mut stmt = self.conn.prepare(
+                "
+                insert into chat (chat_id)
+                values (:chat_id);
+                ",
+            )?;
+
+            stmt.execute(named_params! {
+                ":chat_id": chat_id,
+            })
+            .context("could not create chat")?;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_repost_channel(&self, chat_id: i64, repost_channel_id: i64) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "
+            update chat
+            set repost_channel_id = :repost_channel_id
+            where chat_id = :chat_id;
+            ",
+        )?;
+
+        stmt.execute(named_params! {
+            ":chat_id": chat_id,
+            ":repost_channel_id": repost_channel_id,
+        })
+        .context("could not set repost channel")?;
+
+        Ok(())
+    }
+
+    pub fn get_repost_channel(&self, chat_id: i64) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "
+            select repost_channel_id
+            from chat
+            where chat_id = :chat_id;
+            ",
+        )?;
+
+        let repost_channel_id: Option<i64> = stmt
+            .query_row(
+                named_params! {
+                    ":chat_id": chat_id,
+                },
+                |row| row.get("repost_channel_id"),
+            )
+            .optional()
+            .context("could not get repost channel")?;
+
+        Ok(repost_channel_id)
     }
 }
 
