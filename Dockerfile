@@ -37,6 +37,6 @@ COPY --from=builder /app/target/armv7-unknown-linux-musl/release/tgreddit .
 RUN apt-get update && apt-get install -y \
   curl python3 ffmpeg \
   && rm -rf /var/lib/apt/lists/*
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/download/2022.09.01/yt-dlp -o /usr/local/bin/yt-dlp
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 RUN chmod a+rx /usr/local/bin/yt-dlp
 ENTRYPOINT ["./tgreddit"]
