@@ -275,6 +275,7 @@ impl Database {
     }
 
     pub fn set_repost_channel(&self, chat_id: i64, repost_channel_id: i64) -> Result<()> {
+        self.ensure_chat_exists(chat_id)?;
         let mut stmt = self.conn.prepare(
             "
             update chat
