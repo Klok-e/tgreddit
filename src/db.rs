@@ -123,9 +123,10 @@ impl Database {
         post: &Post,
         seen_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()> {
+        // First, attempt to insert a new row with INSERT OR IGNORE
         let mut stmt = self.conn.prepare(
             "
-            insert or replace into post (post_id, chat_id, subreddit, seen_at, post_title)
+            insert or ignore into post (post_id, chat_id, subreddit, seen_at, post_title)
             values (:post_id, :chat_id, :subreddit, :seen_at, :post_title)
             ",
         )?;
@@ -133,10 +134,24 @@ impl Database {
             ":post_id": post.id,
             ":chat_id": chat_id,
             ":subreddit": &post.subreddit,
-            ":seen_at": seen_at, // pass the optional seen_at value
+            ":seen_at": seen_at,
             ":post_title": &post.title,
+        })?;
+
+        // Then, update the seen_at field for the row with the given post_id and chat_id
+        let mut stmt = self.conn.prepare(
+            "
+            update post
+            set seen_at = :seen_at
+            where post_id = :post_id and chat_id = :chat_id
+            ",
+        )?;
+        stmt.execute(named_params! {
+            ":seen_at": seen_at,
+            ":post_id": post.id,
+            ":chat_id": chat_id,
         })
-        .context("could not record post seen")
+        .context("could not update seen_at")
         .map(|_| ())
     }
 

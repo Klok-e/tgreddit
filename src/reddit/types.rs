@@ -61,7 +61,7 @@ pub struct GalleryData {
 pub struct Media {
     pub x: u16,
     pub y: u16,
-    #[serde(rename = "u")]
+    #[serde(rename = "u", alias = "gif")]
     pub url: String,
 }
 
