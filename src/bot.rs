@@ -326,7 +326,12 @@ async fn callback_handler(
     } else {
         None
     };
-    handle_repost(db, msg.chat.id, &tg, msg.id, data).await?;
+    let msg_id = if let Some(reply_id) = msg.reply_to_message() {
+        reply_id.id
+    } else {
+        msg.id
+    };
+    handle_repost(db, msg.chat.id, &tg, msg_id, data).await?;
 
     Ok(())
 }

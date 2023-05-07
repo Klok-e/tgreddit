@@ -252,7 +252,14 @@ async fn handle_new_gallery_post(
         }
     }
 
-    tg.send_media_group(ChatId(chat_id), media_group).await?;
+    let gallery_msg = tg.send_media_group(ChatId(chat_id), media_group).await?;
+    for msg in gallery_msg {
+        tg.send_message(ChatId(chat_id), "To repost:")
+            .reply_to_message_id(msg.id)
+            .reply_markup(messages::format_repost_buttons(post))
+            .send()
+            .await?;
+    }
     info!("gallery uploaded post_id={} chat_id={chat_id}", post.id);
 
     Ok(())

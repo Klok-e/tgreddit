@@ -76,8 +76,8 @@ const MIGRATIONS: &[&str] = &[
     ) strict;
     ",
     "
-    insert into post_new (post_id, chat_id, subreddit, seen_at)
-    select post_id, chat_id, subreddit, seen_at from post;
+    insert into post_new (post_id, chat_id, subreddit, seen_at, post_title)
+    select post_id, chat_id, subreddit, seen_at, 'Unknown' as post_title from post;
     ",
     "
     drop table post;
