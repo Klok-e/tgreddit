@@ -40,7 +40,13 @@ pub struct MyBot {
 
 impl MyBot {
     pub async fn new(config: Arc<config::Config>) -> Result<Self> {
-        let tg = Arc::new(Bot::new(config.telegram_bot_token.expose_secret()).auto_send());
+        let client = teloxide::net::default_reqwest_settings()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("Client creation failed");
+        let tg = Arc::new(
+            Bot::with_client(config.telegram_bot_token.expose_secret(), client).auto_send(),
+        );
         tg.set_my_commands(Command::bot_commands()).await?;
 
         let handler = dptree::entry()
