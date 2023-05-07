@@ -1,3 +1,5 @@
+use serde_derive::{Deserialize, Serialize};
+
 use crate::reddit::{PostType, TopPostsTimePeriod};
 use std::path::PathBuf;
 
@@ -23,4 +25,13 @@ pub struct SubscriptionArgs {
     pub limit: Option<u32>,
     pub time: Option<TopPostsTimePeriod>,
     pub filter: Option<PostType>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename = "BtnDt")]
+pub struct ButtonCallbackData {
+    #[serde(rename = "n")]
+    pub post_id: String,
+    #[serde(rename = "c")]
+    pub copy_caption: bool,
 }

@@ -65,6 +65,27 @@ const MIGRATIONS: &[&str] = &[
     alter table subscription_new
     rename to subscription;
     ",
+    "
+    create table post_new(
+        post_id     text not null,
+        chat_id     integer not null,
+        subreddit   text not null,
+        seen_at     text, -- make seen_at nullable
+        post_title  text not null, -- new field
+        primary key (post_id, chat_id)
+    ) strict;
+    ",
+    "
+    insert into post_new (post_id, chat_id, subreddit, seen_at)
+    select post_id, chat_id, subreddit, seen_at from post;
+    ",
+    "
+    drop table post;
+    ",
+    "
+    alter table post_new
+    rename to post;
+    ",
 ];
 
 #[derive(Debug)]
@@ -96,21 +117,54 @@ impl Database {
         Migrations::new(migrations).to_latest(&mut self.conn)
     }
 
-    pub fn mark_post_seen(&self, chat_id: i64, post: &Post) -> Result<()> {
+    pub fn record_post(
+        &self,
+        chat_id: i64,
+        post: &Post,
+        seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
         let mut stmt = self.conn.prepare(
             "
-            insert into post (post_id, chat_id, subreddit, seen_at)
-            values (:post_id, :chat_id, :subreddit, :seen_at)
+            insert or replace into post (post_id, chat_id, subreddit, seen_at, post_title)
+            values (:post_id, :chat_id, :subreddit, :seen_at, :post_title)
             ",
         )?;
         stmt.execute(named_params! {
             ":post_id": post.id,
             ":chat_id": chat_id,
             ":subreddit": &post.subreddit,
-            ":seen_at": chrono::Utc::now()
+            ":seen_at": seen_at, // pass the optional seen_at value
+            ":post_title": &post.title,
         })
-        .context("could not mark post seen")
+        .context("could not record post seen")
         .map(|_| ())
+    }
+
+    pub fn record_post_seen_with_current_time(&self, chat_id: i64, post: &Post) -> Result<()> {
+        let current_time = Some(chrono::Utc::now());
+        self.record_post(chat_id, post, current_time)
+    }
+
+    pub fn get_post_title(&self, chat_id: i64, post_id: &str) -> Result<String> {
+        let mut stmt = self.conn.prepare(
+            "
+            select post_title
+            from post
+            where post_id = :post_id and chat_id = :chat_id
+            ",
+        )?;
+
+        let post_title = stmt
+            .query_row(
+                named_params! {
+                    ":post_id": post_id,
+                    ":chat_id": chat_id,
+                },
+                |row| row.get("post_title"),
+            )
+            .context("could not retrieve post title")?;
+
+        Ok(post_title)
     }
 
     pub fn is_post_seen(&self, chat_id: i64, post: &Post) -> Result<bool> {
@@ -119,7 +173,7 @@ impl Database {
             select exists(
                 select 1 
                   from post
-                 where post_id = :post_id and chat_id = :chat_id
+                 where post_id = :post_id and chat_id = :chat_id and seen_at is not null
             );
             ",
         )?;
@@ -385,7 +439,7 @@ mod tests {
         };
 
         assert!(!db.existing_posts_for_subreddit(1, "absoluteunit").unwrap());
-        db.mark_post_seen(1, &post).unwrap();
+        db.record_post_seen_with_current_time(1, &post).unwrap();
         assert!(db.is_post_seen(1, &post).unwrap());
         assert!(db.existing_posts_for_subreddit(1, "absoluteunit").unwrap());
     }
@@ -465,7 +519,7 @@ mod tests {
             post_type: PostType::Video,
             crosspost_parent_list: None,
         };
-        db.mark_post_seen(1, &post).unwrap();
+        db.record_post_seen_with_current_time(1, &post).unwrap();
         assert!(db.is_post_seen(1, &post).unwrap());
         db.unsubscribe(1, "test").unwrap();
         assert!(!db.is_post_seen(1, &post).unwrap());

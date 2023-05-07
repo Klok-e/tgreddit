@@ -1,4 +1,4 @@
-use crate::reddit;
+use crate::reddit::{self, Post};
 use crate::*;
 use itertools::Itertools;
 
@@ -37,10 +37,20 @@ pub fn format_media_caption_html(post: &reddit::Post, links_base_url: Option<&st
     format!("{title}\n{meta}")
 }
 
-pub fn format_repost_buttons(caption: &String) -> InlineKeyboardMarkup {
+pub fn format_repost_buttons(post: &Post) -> InlineKeyboardMarkup {
+    let callback_data = serde_json::to_string(&ButtonCallbackData {
+        post_id: post.id.clone(),
+        copy_caption: true,
+    })
+    .expect("This can't fail i promise");
+    let callback_data_no_title = serde_json::to_string(&ButtonCallbackData {
+        post_id: post.id.clone(),
+        copy_caption: false,
+    })
+    .expect("Can't fail");
     InlineKeyboardMarkup::default().append_row([
-        InlineKeyboardButton::callback("Post to channel", format!("{caption}")),
-        InlineKeyboardButton::callback("Post to channel (no title)", ""),
+        InlineKeyboardButton::callback("Post", callback_data),
+        InlineKeyboardButton::callback("Post (no title)", callback_data_no_title),
     ])
 }
 

@@ -61,7 +61,10 @@ async fn main() -> Result<()> {
         let post = reddit::get_link(&post_id).await.unwrap();
         info!("{:#?}", post);
         if let Some(chat_id) = opts.opt_str("chat-id") {
-            return handle_new_post(&config, &bot.tg, chat_id.parse().unwrap(), &post).await;
+            let db = db::Database::open(&config)?;
+            let chat_id = chat_id.parse().unwrap();
+            db.record_post(chat_id, &post, None)?;
+            return handle_new_post(&config, &bot.tg, chat_id, &post).await;
         }
         return Ok(());
     }
@@ -125,7 +128,7 @@ async fn handle_new_video_post(
         .caption(&caption)
         .height(video.height.into())
         .width(video.width.into())
-        .reply_markup(messages::format_repost_buttons(&post.title))
+        .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
@@ -148,13 +151,13 @@ async fn handle_new_image_post(
             tg.send_photo(ChatId(chat_id), InputFile::file(path))
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .caption(&caption)
-                .reply_markup(messages::format_repost_buttons(&post.title))
+                .reply_markup(messages::format_repost_buttons(post))
                 .await?;
             info!("image uploaded post_id={} chat_id={chat_id}", post.id);
             Ok(())
         }
         Err(e) => {
-            error!("failed to download image: {e}");
+            error!("failed to download image: {e:?}");
             Err(e)
         }
     }
@@ -170,7 +173,7 @@ async fn handle_new_link_post(
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .disable_web_page_preview(false)
-        .reply_markup(messages::format_repost_buttons(&post.title))
+        .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(())
@@ -186,7 +189,7 @@ async fn handle_new_self_post(
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .disable_web_page_preview(true)
-        .reply_markup(messages::format_repost_buttons(&post.title))
+        .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(())
@@ -313,12 +316,13 @@ async fn check_post_newness(
     if !only_mark_seen {
         // Intentionally marking post as seen if handling it fails. It's preferable to not have it
         // fail continuously.
+        db.record_post(chat_id, post, None)?;
         if let Err(e) = handle_new_post(config, tg, chat_id, post).await {
-            error!("failed to handle new post: {e}");
+            error!("failed to handle new post: {e:?}");
         }
     }
 
-    db.mark_post_seen(chat_id, post)?;
+    db.record_post_seen_with_current_time(chat_id, post)?;
     info!("marked post seen: {}", post.id);
 
     Ok(())
@@ -332,7 +336,7 @@ async fn check_new_posts(config: &config::Config, tg: &AutoSend<Bot>) -> Result<
         check_new_posts_for_subscription(config, tg, &sub)
             .await
             .unwrap_or_else(|err| {
-                error!("failed to check subscription for new posts: {err}");
+                error!("failed to check subscription for new posts: {err:?}");
             });
     }
 
@@ -373,12 +377,12 @@ async fn check_new_posts_for_subscription(
                 check_post_newness(config, tg, chat_id, filter, &post, only_mark_seen)
                     .await
                     .unwrap_or_else(|err| {
-                        error!("failed to check post newness: {err}");
+                        error!("failed to check post newness: {err:?}");
                     });
             }
         }
         Err(e) => {
-            error!("failed to get posts for {}: {e}", subreddit)
+            error!("failed to get posts for {}: {e:?}", subreddit)
         }
     };
 

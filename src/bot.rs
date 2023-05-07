@@ -151,7 +151,7 @@ pub async fn handle_command(
                 tg.send_message(message.chat.id, reply).await?;
             }
             Command::Get(args) => {
-                handle_get_command(args, config, message, tg).await?;
+                handle_get_command(db, args, config, message, tg).await?;
             }
             Command::RegisterChannel(channel_id) => {
                 db.set_repost_channel(message.chat.id.0, channel_id)?;
@@ -165,7 +165,11 @@ pub async fn handle_command(
                 description,
                 message_id,
             } => {
-                handle_repost(db, message.chat.id, tg, message_id, description).await?;
+                let button_data = match description.as_str() {
+                    "" => None,
+                    _ => Some(description),
+                };
+                handle_repost(db, message.chat.id, tg, message_id, button_data).await?;
             }
         };
 
@@ -186,7 +190,7 @@ async fn handle_repost(
     chat_id: ChatId,
     tg: &AutoSend<Bot>,
     message_id: i32,
-    description: String,
+    caption: Option<String>,
 ) -> Result<()> {
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
         tg.send_message(
@@ -196,14 +200,20 @@ async fn handle_repost(
         .await?;
         return Ok(());
     };
+    let caption = if let Some(caption) = &caption {
+        caption
+    } else {
+        ""
+    };
     tg.copy_message(ChatId(repost_channel_id), chat_id, message_id)
-        .caption(description)
+        .caption(caption)
         .send()
         .await?;
     Ok(())
 }
 
 async fn handle_get_command(
+    db: db::Database,
     args: SubscriptionArgs,
     config: Arc<config::Config>,
     message: &Message,
@@ -235,8 +245,9 @@ async fn handle_get_command(
     debug!("got {} post(s) for subreddit /r/{}", posts.len(), subreddit);
     if !posts.is_empty() {
         for post in posts {
+            db.record_post(chat_id, &post, None)?;
             if let Err(e) = handle_new_post(&config, tg, chat_id, &post).await {
-                error!("failed to handle new post: {e}");
+                error!("failed to handle new post: {e:?}");
             }
         }
     } else {
@@ -308,7 +319,14 @@ async fn callback_handler(
     let db = db::Database::open(&config)?;
 
     let msg = q.message.expect("Message must exist");
-    handle_repost(db, msg.chat.id, &tg, msg.id, q.data.expect("Data expected")).await?;
+    let data = q.data.expect("Data expected");
+    let data: ButtonCallbackData = serde_json::from_str(&data)?;
+    let data = if data.copy_caption {
+        Some(db.get_post_title(msg.chat.id.0, &data.post_id)?)
+    } else {
+        None
+    };
+    handle_repost(db, msg.chat.id, &tg, msg.id, data).await?;
 
     Ok(())
 }
