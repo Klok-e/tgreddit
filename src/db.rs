@@ -138,12 +138,12 @@ impl Database {
             ":post_title": &post.title,
         })?;
 
-        // Then, update the seen_at field for the row with the given post_id and chat_id
+        // Then, update the seen_at field for the row with the given post_id and chat_id, only if seen_at is null
         let mut stmt = self.conn.prepare(
             "
             update post
             set seen_at = :seen_at
-            where post_id = :post_id and chat_id = :chat_id
+            where post_id = :post_id and chat_id = :chat_id and seen_at is null
             ",
         )?;
         stmt.execute(named_params! {
