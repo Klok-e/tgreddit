@@ -5,11 +5,15 @@ use regex::Regex;
 use std::sync::Arc;
 use teloxide::{
     dispatching::DefaultKey,
-    utils::command::{BotCommands, ParseError}, types::MessageId,
+    types::MessageId,
+    utils::command::{BotCommands, ParseError},
 };
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase", description = "These commands are supported:")]
+#[command(
+    rename_rule = "lowercase",
+    description = "These commands are supported:"
+)]
 pub enum Command {
     #[command(description = "display this text")]
     Help,
@@ -34,8 +38,8 @@ pub enum Command {
 }
 
 pub struct MyBot {
-    pub dispatcher: Dispatcher<Arc<AutoSend<Bot>>, anyhow::Error, DefaultKey>,
-    pub tg: Arc<AutoSend<Bot>>,
+    pub dispatcher: Dispatcher<Arc<Bot>, anyhow::Error, DefaultKey>,
+    pub tg: Arc<Bot>,
 }
 
 impl MyBot {
@@ -44,9 +48,10 @@ impl MyBot {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("Client creation failed");
-        let tg = Arc::new(
-            Bot::with_client(config.telegram_bot_token.expose_secret(), client).auto_send(),
-        );
+        let tg = Arc::new(Bot::with_client(
+            config.telegram_bot_token.expose_secret(),
+            client,
+        ));
         tg.set_my_commands(Command::bot_commands()).await?;
 
         let handler = dptree::entry()
@@ -103,13 +108,13 @@ impl MyBot {
 
 pub async fn handle_command(
     message: Message,
-    tg: Arc<AutoSend<Bot>>,
+    tg: Arc<Bot>,
     command: Command,
     config: Arc<config::Config>,
 ) -> Result<()> {
     async fn handle(
         message: &Message,
-        tg: &AutoSend<Bot>,
+        tg: &Bot,
         command: Command,
         config: Arc<config::Config>,
     ) -> Result<()> {
@@ -194,14 +199,14 @@ pub async fn handle_command(
 async fn handle_repost(
     db: db::Database,
     chat_id: ChatId,
-    tg: &AutoSend<Bot>,
+    tg: &Bot,
     message_id: i32,
     caption: Option<String>,
 ) -> Result<()> {
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
         tg.send_message(
             chat_id,
-            format!("Repost channel not registered"),
+            "Repost channel not registered".to_string(),
         )
         .await?;
         return Ok(());
@@ -223,7 +228,7 @@ async fn handle_get_command(
     args: SubscriptionArgs,
     config: Arc<config::Config>,
     message: &Message,
-    tg: &AutoSend<Bot>,
+    tg: &Bot,
 ) -> Result<(), anyhow::Error> {
     let subreddit = &args.subreddit;
     let limit = args
@@ -320,7 +325,7 @@ fn parse_subscribe_message(input: String) -> Result<(SubscriptionArgs,), ParseEr
 async fn callback_handler(
     q: CallbackQuery,
     config: Arc<config::Config>,
-    tg: Arc<AutoSend<Bot>>,
+    tg: Arc<Bot>,
 ) -> Result<()> {
     let db = db::Database::open(&config)?;
 
