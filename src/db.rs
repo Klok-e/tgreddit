@@ -263,20 +263,6 @@ impl Database {
             )
             .context("could not delete subscription")?;
 
-        // Delete posts so that if subreddit is subscribed to later, the first posts seen won't be
-        // considered new.
-        let mut stmt = self.conn.prepare(
-            "
-            delete from post
-            where chat_id = :chat_id and subreddit = :subreddit
-            ",
-        )?;
-        stmt.execute(named_params! {
-            ":chat_id": chat_id,
-            ":subreddit": deleted_subreddit,
-        })
-        .context("could not delete posts")?;
-
         Ok(deleted_subreddit)
     }
 
