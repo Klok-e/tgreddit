@@ -296,11 +296,21 @@ async fn handle_new_post(
     }
 
     match post.post_type {
-        reddit::PostType::Image => handle_new_image_post(config, tg, chat_id, &post).await,
-        reddit::PostType::Video => handle_new_video_post(config, tg, chat_id, &post).await,
-        reddit::PostType::Link => handle_new_link_post(config, tg, chat_id, &post).await,
-        reddit::PostType::SelfText => handle_new_self_post(config, tg, chat_id, &post).await,
-        reddit::PostType::Gallery => handle_new_gallery_post(config, tg, chat_id, &post).await,
+        reddit::PostType::Image => handle_new_image_post(config, tg, chat_id, &post)
+            .await
+            .context("Failed handling new image"),
+        reddit::PostType::Video => handle_new_video_post(config, tg, chat_id, &post)
+            .await
+            .context("Failed handling new video"),
+        reddit::PostType::Link => handle_new_link_post(config, tg, chat_id, &post)
+            .await
+            .context("Failed handling new link post"),
+        reddit::PostType::SelfText => handle_new_self_post(config, tg, chat_id, &post)
+            .await
+            .context("Failed handling new self"),
+        reddit::PostType::Gallery => handle_new_gallery_post(config, tg, chat_id, &post)
+            .await
+            .context("Failed handling new gallery"),
         // /r/bestof posts have no characteristics like post_hint that could be used to
         // determine them as a type of Link; as a workaround, post Unknown post types the same way
         // as a link

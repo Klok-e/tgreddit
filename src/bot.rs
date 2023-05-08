@@ -382,9 +382,13 @@ async fn callback_handler(
     };
     if data.is_gallery {
         let tg_file_ids = db.get_telegram_files_for_post(&data.post_id, msg.chat.id.0)?;
-        handle_repost_gallery(db, msg.chat.id, &tg, tg_file_ids, caption).await?;
+        handle_repost_gallery(db, msg.chat.id, &tg, tg_file_ids, caption)
+            .await
+            .context("Failed handling gallery repost")?;
     } else {
-        handle_repost(db, msg.chat.id, &tg, msg_id.0, caption).await?;
+        handle_repost(db, msg.chat.id, &tg, msg_id.0, caption)
+            .await
+            .context("Failed handling repost")?;
     }
 
     Ok(())
