@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_db_unsubscribe_deletes_posts() {
+    fn test_db_unsubscribe_doesnt_delete_posts() {
         let config = Config::default();
         let mut db = Database::open(&config).unwrap();
         db.migrate().unwrap();
@@ -523,6 +523,6 @@ mod tests {
         db.record_post_seen_with_current_time(1, &post).unwrap();
         assert!(db.is_post_seen(1, &post).unwrap());
         db.unsubscribe(1, "test").unwrap();
-        assert!(!db.is_post_seen(1, &post).unwrap());
+        assert!(db.is_post_seen(1, &post).unwrap());
     }
 }
