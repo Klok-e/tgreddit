@@ -86,6 +86,15 @@ const MIGRATIONS: &[&str] = &[
     alter table post_new
     rename to post;
     ",
+    "
+    create table telegram_file(
+        id                  integer primary key autoincrement,
+        post_id             text not null,
+        chat_id             integer not null,
+        telegram_file_id    text not null,
+        foreign key (post_id, chat_id) references post(post_id, chat_id)
+    ) strict;
+    ",
 ];
 
 #[derive(Debug)]
@@ -368,6 +377,50 @@ impl Database {
             .context("could not get repost channel")?;
 
         Ok(repost_channel_id)
+    }
+
+    pub fn add_telegram_file(
+        &self,
+        post_id: &str,
+        chat_id: i64,
+        telegram_file_id: &str,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "
+            insert into telegram_file (post_id, chat_id, telegram_file_id)
+            values (:post_id, :chat_id, :telegram_file_id)
+            ",
+        )?;
+        stmt.execute(named_params! {
+            ":post_id": post_id,
+            ":chat_id": chat_id,
+            ":telegram_file_id": telegram_file_id,
+        })
+        .context("could not add telegram file")
+        .map(|_| ())
+    }
+
+    pub fn get_telegram_files_for_post(&self, post_id: &str, chat_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "
+            select telegram_file_id
+            from telegram_file
+            where post_id = :post_id and chat_id = :chat_id
+            ",
+        )?;
+
+        let rows = stmt
+            .query_map(
+                named_params! {
+                    ":post_id": post_id,
+                    ":chat_id": chat_id,
+                },
+                |row| row.get("telegram_file_id"),
+            )
+            .context("could not retrieve telegram files")?;
+
+        let telegram_files: Result<Vec<String>, _> = rows.collect();
+        Ok(telegram_files?)
     }
 }
 

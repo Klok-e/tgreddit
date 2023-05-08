@@ -253,13 +253,26 @@ async fn handle_new_gallery_post(
     }
 
     let gallery_msg = tg.send_media_group(ChatId(chat_id), media_group).await?;
+    let db = db::Database::open(config)?;
     for msg in gallery_msg {
-        tg.send_message(ChatId(chat_id), "To repost:")
-            .reply_to_message_id(msg.id)
-            .reply_markup(messages::format_repost_buttons(post))
-            .send()
-            .await?;
+        db.add_telegram_file(
+            &post.id,
+            chat_id,
+            &msg.photo()
+                .expect("Photo expected")
+                .iter()
+                .max_by_key(|x| x.file.size)
+                .expect("There must be at least one element")
+                .file
+                .id,
+        )?;
     }
+
+    tg.send_message(ChatId(chat_id), "To repost:")
+        .reply_markup(messages::format_repost_buttons_gallery(post, true))
+        .send()
+        .await?;
+
     info!("gallery uploaded post_id={} chat_id={chat_id}", post.id);
 
     Ok(())

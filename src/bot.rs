@@ -223,6 +223,44 @@ async fn handle_repost(
     Ok(())
 }
 
+async fn handle_repost_gallery(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    gallery_file_ids: Vec<String>,
+    post_caption: Option<String>,
+) -> Result<()> {
+    let mut media_group = vec![];
+    let mut first = true;
+
+    for file_id in gallery_file_ids {
+        let mut input_media_photo = InputMediaPhoto::new(InputFile::file_id(file_id));
+        // The first InputMediaPhoto in the vector needs to contain the caption and parse_mode;
+        if first {
+            if let Some(caption) = &post_caption {
+                input_media_photo = input_media_photo.caption(caption);
+            }
+            input_media_photo = input_media_photo.parse_mode(teloxide::types::ParseMode::Html);
+            first = false;
+        }
+
+        media_group.push(InputMedia::Photo(input_media_photo))
+    }
+
+    let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
+        tg.send_message(
+            chat_id,
+            "Repost channel not registered".to_string(),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    tg.send_media_group(ChatId(repost_channel_id), media_group)
+        .await?;
+    Ok(())
+}
+
 async fn handle_get_command(
     db: db::Database,
     args: SubscriptionArgs,
@@ -332,7 +370,7 @@ async fn callback_handler(
     let msg = q.message.expect("Message must exist");
     let data = q.data.expect("Data expected");
     let data: ButtonCallbackData = serde_json::from_str(&data)?;
-    let data = if data.copy_caption {
+    let caption = if data.copy_caption {
         Some(db.get_post_title(msg.chat.id.0, &data.post_id)?)
     } else {
         None
@@ -342,7 +380,12 @@ async fn callback_handler(
     } else {
         msg.id
     };
-    handle_repost(db, msg.chat.id, &tg, msg_id.0, data).await?;
+    if data.is_gallery {
+        let tg_file_ids = db.get_telegram_files_for_post(&data.post_id, msg.chat.id.0)?;
+        handle_repost_gallery(db, msg.chat.id, &tg, tg_file_ids, caption).await?;
+    } else {
+        handle_repost(db, msg.chat.id, &tg, msg_id.0, caption).await?;
+    }
 
     Ok(())
 }

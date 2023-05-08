@@ -34,4 +34,6 @@ pub struct ButtonCallbackData {
     pub post_id: String,
     #[serde(rename = "c")]
     pub copy_caption: bool,
+    #[serde(rename = "d")]
+    pub is_gallery: bool,
 }
