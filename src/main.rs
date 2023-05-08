@@ -255,17 +255,14 @@ async fn handle_new_gallery_post(
     let gallery_msg = tg.send_media_group(ChatId(chat_id), media_group).await?;
     let db = db::Database::open(config)?;
     for msg in gallery_msg {
-        db.add_telegram_file(
-            &post.id,
-            chat_id,
-            &msg.photo()
-                .expect("Photo expected")
-                .iter()
-                .max_by_key(|x| x.file.size)
-                .expect("There must be at least one element")
-                .file
-                .id,
-        )?;
+        let file_meta = &msg
+            .photo()
+            .expect("Photo expected")
+            .iter()
+            .max_by_key(|x| x.file.size)
+            .expect("There must be at least one element")
+            .file;
+        db.add_telegram_file(&post.id, chat_id, &file_meta.id, &file_meta.unique_id)?;
     }
 
     tg.send_message(ChatId(chat_id), "To repost:")

@@ -95,6 +95,23 @@ const MIGRATIONS: &[&str] = &[
         foreign key (post_id, chat_id) references post(post_id, chat_id)
     ) strict;
     ",
+    "
+    create table telegram_file_new(
+        post_id                    text not null,
+        chat_id                    integer not null,
+        telegram_file_id           text not null,
+        telegram_file_unique_id    text not null,
+        foreign key (post_id, chat_id) references post(post_id, chat_id),
+        primary key (post_id, chat_id, telegram_file_unique_id)
+    ) strict;
+    ",
+    "
+    drop table telegram_file;
+    ",
+    "
+    alter table telegram_file_new
+    rename to telegram_file;
+    ",
 ];
 
 #[derive(Debug)]
@@ -384,17 +401,19 @@ impl Database {
         post_id: &str,
         chat_id: i64,
         telegram_file_id: &str,
+        telegram_unique_file_id: &str,
     ) -> Result<()> {
         let mut stmt = self.conn.prepare(
             "
-            insert into telegram_file (post_id, chat_id, telegram_file_id)
-            values (:post_id, :chat_id, :telegram_file_id)
+            insert or ignore into telegram_file (post_id, chat_id, telegram_file_id, telegram_file_unique_id)
+            values (:post_id, :chat_id, :telegram_file_id, :telegram_file_unique_id)
             ",
         )?;
         stmt.execute(named_params! {
             ":post_id": post_id,
             ":chat_id": chat_id,
             ":telegram_file_id": telegram_file_id,
+            ":telegram_file_unique_id": telegram_unique_file_id,
         })
         .context("could not add telegram file")
         .map(|_| ())
