@@ -5,24 +5,24 @@ use regex::Regex;
 use std::sync::Arc;
 use teloxide::{
     dispatching::DefaultKey,
-    utils::command::{BotCommands, ParseError},
+    utils::command::{BotCommands, ParseError}, types::MessageId,
 };
 
 #[derive(BotCommands, Clone)]
-#[command(rename = "lowercase", description = "These commands are supported:")]
+#[command(rename_rule = "lowercase", description = "These commands are supported:")]
 pub enum Command {
     #[command(description = "display this text")]
     Help,
     #[command(
         description = "subscribe to subreddit's top posts",
-        parse_with = "parse_subscribe_message"
+        parse_with = parse_subscribe_message
     )]
     Sub(SubscriptionArgs),
     #[command(description = "unsubscribe from subreddit's top posts")]
     Unsub(String),
     #[command(description = "list subreddit subscriptions")]
     ListSubs,
-    #[command(description = "get top posts", parse_with = "parse_subscribe_message")]
+    #[command(description = "get top posts", parse_with = parse_subscribe_message)]
     Get(SubscriptionArgs),
     #[command(description = "register channel to which the bot is supposed to post")]
     RegisterChannel(i64),
@@ -211,7 +211,7 @@ async fn handle_repost(
     } else {
         ""
     };
-    tg.copy_message(ChatId(repost_channel_id), chat_id, message_id)
+    tg.copy_message(ChatId(repost_channel_id), chat_id, MessageId(message_id))
         .caption(caption)
         .send()
         .await?;
@@ -337,7 +337,7 @@ async fn callback_handler(
     } else {
         msg.id
     };
-    handle_repost(db, msg.chat.id, &tg, msg_id, data).await?;
+    handle_repost(db, msg.chat.id, &tg, msg_id.0, data).await?;
 
     Ok(())
 }
