@@ -229,7 +229,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(
             "
-            insert into subscription (chat_id, subreddit, post_limit, time, filter, created_at)
+            insert or replace into subscription (chat_id, subreddit, post_limit, time, filter, created_at)
             values (:chat_id, :subreddit, :limit, :time, :filter, :created_at)
             ",
         )?;
