@@ -112,6 +112,27 @@ const MIGRATIONS: &[&str] = &[
     alter table telegram_file_new
     rename to telegram_file;
     ",
+    "
+    CREATE TABLE telegram_file_new(
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id             TEXT NOT NULL,
+        chat_id             INTEGER NOT NULL,
+        telegram_file_id    TEXT NOT NULL,
+        telegram_file_unique_id    TEXT NOT NULL,
+        FOREIGN KEY (post_id, chat_id) REFERENCES post(post_id, chat_id),
+        UNIQUE (post_id, chat_id, telegram_file_unique_id)
+    ) STRICT;
+    ",
+    "
+    INSERT INTO telegram_file_new (post_id, chat_id, telegram_file_id, telegram_file_unique_id)
+    SELECT post_id, chat_id, telegram_file_id, telegram_file_unique_id FROM telegram_file;
+    ",
+    "
+    DROP TABLE telegram_file;
+    ",
+    "
+    ALTER TABLE telegram_file_new RENAME TO telegram_file;
+    ",
 ];
 
 #[derive(Debug)]
@@ -425,6 +446,7 @@ impl Database {
             select telegram_file_id
             from telegram_file
             where post_id = :post_id and chat_id = :chat_id
+            order by telegram_file.id
             ",
         )?;
 
