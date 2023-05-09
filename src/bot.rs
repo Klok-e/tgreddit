@@ -45,7 +45,7 @@ pub struct MyBot {
 impl MyBot {
     pub async fn new(config: Arc<config::Config>) -> Result<Self> {
         let client = teloxide::net::default_reqwest_settings()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(600))
             .build()
             .expect("Client creation failed");
         let tg = Arc::new(Bot::with_client(
