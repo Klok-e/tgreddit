@@ -329,10 +329,7 @@ async fn handle_get_command(
     debug!("got {} post(s) for subreddit /r/{}", posts.len(), subreddit);
     if !posts.is_empty() {
         for post in posts {
-            db.record_post(chat_id, &post, None)?;
-            if let Err(e) = handle_new_post(&config, tg, chat_id, &post).await {
-                error!("failed to handle new post: {e:?}");
-            }
+            process_post(&db, chat_id, &post, &config, tg).await?;
         }
     } else {
         tg.send_message(message.chat.id, "No posts found").await?;

@@ -1559,6 +1559,7 @@ dependencies = [
  "chrono",
  "duct",
  "env_logger",
+ "futures",
  "getopts",
  "itertools 0.10.5",
  "lazy_static",

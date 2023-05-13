@@ -6,10 +6,10 @@ use rusqlite::{
     OptionalExtension,
 };
 use rusqlite_migration::{Migrations, M};
-use std::convert::TryFrom;
 use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
+use std::{convert::TryFrom, sync::Mutex};
 
 const MIGRATIONS: &[&str] = &[
     "
@@ -137,14 +137,16 @@ const MIGRATIONS: &[&str] = &[
 
 #[derive(Debug)]
 pub struct Database {
-    pub conn: Connection,
+    pub conn: Mutex<Connection>,
 }
 
 impl Database {
     pub fn open(config: &Config) -> Result<Self> {
         let conn = Self::get_conn(&config.db_path).context("error connecting to database")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Database { conn })
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
     }
 
     #[cfg(test)]
@@ -161,7 +163,7 @@ impl Database {
 
     pub fn migrate(&mut self) -> Result<(), rusqlite_migration::Error> {
         let migrations = MIGRATIONS.iter().map(|e| M::up(e)).collect();
-        Migrations::new(migrations).to_latest(&mut self.conn)
+        Migrations::new(migrations).to_latest(&mut self.conn.lock().expect("No poison"))
     }
 
     pub fn record_post(
@@ -171,7 +173,8 @@ impl Database {
         seen_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()> {
         // First, attempt to insert a new row with INSERT OR IGNORE
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             insert or ignore into post (post_id, chat_id, subreddit, seen_at, post_title)
             values (:post_id, :chat_id, :subreddit, :seen_at, :post_title)
@@ -186,7 +189,7 @@ impl Database {
         })?;
 
         // Then, update the seen_at field for the row with the given post_id and chat_id, only if seen_at is null
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "
             update post
             set seen_at = :seen_at
@@ -208,7 +211,8 @@ impl Database {
     }
 
     pub fn get_post_title(&self, chat_id: i64, post_id: &str) -> Result<String> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select post_title
             from post
@@ -230,7 +234,8 @@ impl Database {
     }
 
     pub fn is_post_seen(&self, chat_id: i64, post: &Post) -> Result<bool> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select exists(
                 select 1 
@@ -251,7 +256,8 @@ impl Database {
     }
 
     pub fn existing_posts_for_subreddit(&self, chat_id: i64, subreddit: &str) -> Result<bool> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select exists(
                 select 1
@@ -274,7 +280,8 @@ impl Database {
     pub fn subscribe(&self, chat_id: i64, args: &SubscriptionArgs) -> Result<()> {
         self.ensure_chat_exists(chat_id)?;
 
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             insert or replace into subscription (chat_id, subreddit, post_limit, time, filter, created_at)
             values (:chat_id, :subreddit, :limit, :time, :filter, :created_at)
@@ -293,7 +300,8 @@ impl Database {
     }
 
     pub fn unsubscribe(&self, chat_id: i64, subreddit: &str) -> Result<String> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             delete from subscription
             where chat_id = :chat_id and subreddit LIKE :subreddit
@@ -314,7 +322,8 @@ impl Database {
     }
 
     pub fn get_subscriptions_for_chat(&self, chat_id: i64) -> Result<Vec<Subscription>> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select chat_id, subreddit, post_limit, time, filter, created_at
             from subscription
@@ -330,7 +339,8 @@ impl Database {
     }
 
     pub fn get_all_subscriptions(&self) -> Result<Vec<Subscription>> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select chat_id, subreddit, post_limit, time, filter, created_at
             from subscription
@@ -345,7 +355,8 @@ impl Database {
     }
 
     pub fn ensure_chat_exists(&self, chat_id: i64) -> Result<()> {
-        let chat_exists: bool = self.conn.query_row(
+        let conn = &self.conn.lock().expect("No poison");
+        let chat_exists: bool = conn.query_row(
             "
             select exists(
                 select 1
@@ -360,7 +371,7 @@ impl Database {
         )?;
 
         if !chat_exists {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "
                 insert into chat (chat_id)
                 values (:chat_id);
@@ -378,7 +389,8 @@ impl Database {
 
     pub fn set_repost_channel(&self, chat_id: i64, repost_channel_id: i64) -> Result<()> {
         self.ensure_chat_exists(chat_id)?;
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             update chat
             set repost_channel_id = :repost_channel_id
@@ -396,7 +408,8 @@ impl Database {
     }
 
     pub fn get_repost_channel(&self, chat_id: i64) -> Result<Option<i64>> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select repost_channel_id
             from chat
@@ -424,7 +437,8 @@ impl Database {
         telegram_file_id: &str,
         telegram_unique_file_id: &str,
     ) -> Result<()> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             insert or ignore into telegram_file (post_id, chat_id, telegram_file_id, telegram_file_unique_id)
             values (:post_id, :chat_id, :telegram_file_id, :telegram_file_unique_id)
@@ -441,7 +455,8 @@ impl Database {
     }
 
     pub fn get_telegram_files_for_post(&self, post_id: &str, chat_id: i64) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let conn = &self.conn.lock().expect("No poison");
+        let mut stmt = conn.prepare(
             "
             select telegram_file_id
             from telegram_file

@@ -343,15 +343,26 @@ async fn check_post_newness(
     if !only_mark_seen {
         // Intentionally marking post as seen if handling it fails. It's preferable to not have it
         // fail continuously.
-        db.record_post(chat_id, post, None)?;
-        if let Err(e) = handle_new_post(config, tg, chat_id, post).await {
-            error!("failed to handle new post: {e:?}");
-        }
+        process_post(&db, chat_id, post, config, tg).await?;
     }
 
     db.record_post_seen_with_current_time(chat_id, post)?;
     info!("marked post seen: {}", post.id);
 
+    Ok(())
+}
+
+async fn process_post(
+    db: &db::Database,
+    chat_id: i64,
+    post: &reddit::Post,
+    config: &config::Config,
+    tg: &Bot,
+) -> Result<()> {
+    db.record_post(chat_id, post, None)?;
+    if let Err(e) = handle_new_post(config, tg, chat_id, post).await {
+        error!("failed to handle new post: {e:?}");
+    };
     Ok(())
 }
 
