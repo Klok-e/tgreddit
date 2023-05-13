@@ -62,8 +62,12 @@ impl MyBot {
                             .map(|user| config.authorized_user_ids.contains(&user.id.0))
                             .unwrap_or_default()
                     })
-                    .filter_command::<Command>()
-                    .endpoint(handle_command),
+                    .branch(
+                        dptree::entry()
+                            .filter_command::<Command>()
+                            .endpoint(handle_command),
+                    )
+                    .branch(dptree::entry().endpoint(handle_no_command)),
                 ),
             )
             .branch(
@@ -104,6 +108,37 @@ impl MyBot {
             shutdown_token,
         )
     }
+}
+
+pub async fn handle_no_command(
+    message: Message,
+    tg: Arc<Bot>,
+    config: Arc<config::Config>,
+) -> Result<()> {
+    async fn handle(message: &Message, tg: &Arc<Bot>, config: &Arc<config::Config>) -> Result<()> {
+        lazy_static! {
+            static ref RE: Regex = Regex::new(r"comments/(\w+)").unwrap();
+        }
+
+        let text = message.text().context("No text in message")?;
+        let id = RE
+            .captures(text)
+            .context("Couldn't match reddit post url")?
+            .get(1)
+            .context("Couldn't find reddit post id")?
+            .as_str();
+        let post = reddit::get_link(id).await?;
+        check_post_newness(config, tg, message.chat.id.0, None, &post, false).await?;
+
+        Ok(())
+    }
+    if let Err(err) = handle(&message, &tg, &config).await {
+        error!("failed to handle message: {:?}", err);
+        tg.send_message(message.chat.id, format!("Something went wrong: {}", err))
+            .await?;
+    }
+
+    Ok(())
 }
 
 pub async fn handle_command(
