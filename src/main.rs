@@ -359,7 +359,7 @@ async fn process_post(
     config: &config::Config,
     tg: &Bot,
 ) -> Result<()> {
-    db.record_post(chat_id, post, None)?;
+    db.record_post_seen_with_current_time(chat_id, post)?;
     if let Err(e) = handle_new_post(config, tg, chat_id, post).await {
         error!("failed to handle new post: {e:?}");
     };
