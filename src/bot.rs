@@ -128,7 +128,8 @@ pub async fn handle_no_command(
             .context("Couldn't find reddit post id")?
             .as_str();
         let post = reddit::get_link(id).await?;
-        check_post_newness(config, tg, message.chat.id.0, None, &post, false).await?;
+        let db = db::Database::open(config)?;
+        process_post(&db, message.chat.id.0, &post, config, tg).await?;
 
         Ok(())
     }
