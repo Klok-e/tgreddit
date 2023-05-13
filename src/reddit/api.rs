@@ -5,7 +5,7 @@ use thiserror::Error;
 use url::Url;
 
 static REDDIT_BASE_URL: &str = "https://www.reddit.com";
-const USER_AGENT: &str = "Linux:tgreddit:0.1.0";
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 fn get_base_url() -> Url {
     Url::parse(REDDIT_BASE_URL).unwrap()
@@ -39,7 +39,7 @@ pub async fn get_subreddit_top_posts(
     let url = get_base_url()
         .join(&format!("/r/{subreddit}/top.json"))
         .unwrap();
-    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
+    let client = create_client().build()?;
     let res = client
         .get(url)
         .query(&[
@@ -55,10 +55,14 @@ pub async fn get_subreddit_top_posts(
     Ok(posts)
 }
 
+fn create_client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().user_agent(USER_AGENT)
+}
+
 pub async fn get_link(link_id: &str) -> Result<Post> {
     info!("getting link id {link_id}");
     let url = get_base_url().join("/api/info.json")?;
-    let client = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
+    let client = create_client().build()?;
     let res = client
         .get(url)
         .query(&[("id", &format!("t3_{link_id}"))])
@@ -90,8 +94,7 @@ pub enum SubredditAboutError {
 
 pub async fn get_subreddit_about(subreddit: &str) -> Result<SubredditAbout, SubredditAboutError> {
     info!("getting subreddit about for /r/{subreddit}");
-    let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+    let client = create_client()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let url = get_base_url().join(&format!("/r/{subreddit}/about.json"))?;
