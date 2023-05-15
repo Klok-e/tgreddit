@@ -2,6 +2,7 @@ use crate::reddit::{self};
 use crate::{config, db, download::*, messages, ytdlp};
 use anyhow::{Context, Result};
 use log::*;
+use url::Url;
 
 use std::collections::HashMap;
 use std::string::ToString;
@@ -13,6 +14,31 @@ use teloxide::{
 };
 use teloxide::{prelude::*, types::InputMedia};
 use tempdir::TempDir;
+
+pub async fn handle_video_link(
+    db: &db::Database,
+    tg: &Bot,
+    chat_id: i64,
+    link: &Url,
+) -> Result<()> {
+    let video = tokio::task::block_in_place(|| ytdlp::download(link.as_str()))?;
+    db.record_post_seen_with_current_time(chat_id, &video)?;
+
+    info!("got a video: {video:?}");
+    let caption = messages::format_link_video_caption_html(&video);
+    tg.send_video(ChatId(chat_id), InputFile::file(&video.path))
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .caption(&caption)
+        .height(video.height.into())
+        .width(video.width.into())
+        .reply_markup(messages::format_repost_buttons(&video))
+        .await?;
+    info!(
+        "video uploaded post_id={} chat_id={chat_id} video={video:?}",
+        video.id
+    );
+    Ok(())
+}
 
 async fn handle_new_video_post(
     config: &config::Config,

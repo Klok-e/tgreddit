@@ -166,10 +166,10 @@ impl Database {
         Migrations::new(migrations).to_latest(&mut self.conn.lock().expect("No poison"))
     }
 
-    pub fn record_post(
+    pub fn record_post<T: Recordable>(
         &self,
         chat_id: i64,
-        post: &Post,
+        post: &T,
         seen_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<()> {
         // First, attempt to insert a new row with INSERT OR IGNORE
@@ -181,11 +181,11 @@ impl Database {
             ",
         )?;
         stmt.execute(named_params! {
-            ":post_id": post.id,
+            ":post_id": post.id(),
             ":chat_id": chat_id,
-            ":subreddit": &post.subreddit,
+            ":subreddit": &post.subreddit(),
             ":seen_at": seen_at,
-            ":post_title": &post.title,
+            ":post_title": &post.title(),
         })?;
 
         // Then, update the seen_at field for the row with the given post_id and chat_id, only if seen_at is null
@@ -198,14 +198,18 @@ impl Database {
         )?;
         stmt.execute(named_params! {
             ":seen_at": seen_at,
-            ":post_id": post.id,
+            ":post_id": post.id(),
             ":chat_id": chat_id,
         })
         .context("could not update seen_at")
         .map(|_| ())
     }
 
-    pub fn record_post_seen_with_current_time(&self, chat_id: i64, post: &Post) -> Result<()> {
+    pub fn record_post_seen_with_current_time<T: Recordable>(
+        &self,
+        chat_id: i64,
+        post: &T,
+    ) -> Result<()> {
         let current_time = Some(chrono::Utc::now());
         self.record_post(chat_id, post, current_time)
     }
@@ -233,7 +237,7 @@ impl Database {
         Ok(post_title)
     }
 
-    pub fn is_post_seen(&self, chat_id: i64, post: &Post) -> Result<bool> {
+    pub fn is_post_seen<T: Recordable>(&self, chat_id: i64, post: &T) -> Result<bool> {
         let conn = &self.conn.lock().expect("No poison");
         let mut stmt = conn.prepare(
             "
@@ -247,7 +251,7 @@ impl Database {
 
         stmt.query_row(
             named_params! {
-                ":post_id": post.id,
+                ":post_id": post.id(),
                 ":chat_id": chat_id
             },
             |row| row.get(0),
@@ -478,6 +482,12 @@ impl Database {
         let telegram_files: Result<Vec<String>, _> = rows.collect();
         Ok(telegram_files?)
     }
+}
+
+pub trait Recordable {
+    fn id(&self) -> &str;
+    fn title(&self) -> &str;
+    fn subreddit(&self) -> &str;
 }
 
 impl ToSql for TopPostsTimePeriod {

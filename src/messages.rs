@@ -1,5 +1,8 @@
-use crate::reddit::{self, Post};
 use crate::*;
+use crate::{
+    db::Recordable,
+    reddit::{self},
+};
 use itertools::Itertools;
 
 fn escape(html: &str) -> String {
@@ -37,15 +40,24 @@ pub fn format_media_caption_html(post: &reddit::Post, links_base_url: Option<&st
     format!("{title}\n{meta}")
 }
 
-pub fn format_repost_buttons_gallery(post: &Post, is_gallery: bool) -> InlineKeyboardMarkup {
+pub fn format_link_video_caption_html(video: &Video) -> String {
+    let title = &video.title;
+    let meta = format_html_anchor(&video.url, "video link");
+    format!("{title}\n{meta}")
+}
+
+pub fn format_repost_buttons_gallery<T: Recordable>(
+    post: &T,
+    is_gallery: bool,
+) -> InlineKeyboardMarkup {
     let callback_data = serde_json::to_string(&ButtonCallbackData {
-        post_id: post.id.clone(),
+        post_id: post.id().to_owned(),
         copy_caption: true,
         is_gallery,
     })
     .expect("This can't fail i promise");
     let callback_data_no_title = serde_json::to_string(&ButtonCallbackData {
-        post_id: post.id.clone(),
+        post_id: post.id().to_owned(),
         copy_caption: false,
         is_gallery,
     })
@@ -56,7 +68,7 @@ pub fn format_repost_buttons_gallery(post: &Post, is_gallery: bool) -> InlineKey
     ])
 }
 
-pub fn format_repost_buttons(post: &Post) -> InlineKeyboardMarkup {
+pub fn format_repost_buttons<T: Recordable>(post: &T) -> InlineKeyboardMarkup {
     format_repost_buttons_gallery(post, false)
 }
 

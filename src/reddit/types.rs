@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::db::Recordable;
+
 use super::*;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer};
@@ -187,6 +189,20 @@ impl Post {
 
     pub(crate) fn format_old_permalink_url(&self) -> String {
         to_old_reddit_url(&format_url_from_path(&self.permalink, None))
+    }
+}
+
+impl Recordable for Post {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn subreddit(&self) -> &str {
+        &self.subreddit
     }
 }
 

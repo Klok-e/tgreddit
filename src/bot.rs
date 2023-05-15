@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{handle_post::handle_video_link, *};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -123,19 +123,28 @@ pub async fn handle_no_command(
 ) -> Result<()> {
     async fn handle(message: &Message, tg: &Arc<Bot>, config: &Arc<config::Config>) -> Result<()> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(r"comments/(\w+)").unwrap();
+            static ref RE_REDDIT: Regex = Regex::new(r"comments/(\w+)").unwrap();
+            static ref RE_YOUTUBE: Regex =
+                Regex::new(r"(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)").unwrap();
         }
 
         let text = message.text().context("No text in message")?;
-        let id = RE
-            .captures(text)
-            .context("Couldn't match reddit post url")?
-            .get(1)
-            .context("Couldn't find reddit post id")?
-            .as_str();
-        let post = reddit::get_link(id).await?;
+
         let db = db::Database::open(config)?;
-        process_post(&db, message.chat.id.0, &post, config, tg).await?;
+        // Check if the text matches the YouTube regex
+        if RE_YOUTUBE.is_match(text) {
+            let link = Url::parse(text)?;
+            handle_video_link(&db, tg, message.chat.id.0, &link).await?;
+        } else {
+            let id = RE_REDDIT
+                .captures(text)
+                .context("Couldn't match reddit post url")?
+                .get(1)
+                .context("Couldn't find reddit post id")?
+                .as_str();
+            let post = reddit::get_link(id).await?;
+            process_post(&db, message.chat.id.0, &post, config, tg).await?;
+        }
 
         Ok(())
     }
