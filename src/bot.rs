@@ -2,12 +2,15 @@ use crate::*;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::sync::Arc;
+use std::{env, sync::Arc};
 use teloxide::{
     dispatching::DefaultKey,
     types::MessageId,
     utils::command::{BotCommands, ParseError},
 };
+use url::Url;
+
+const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -48,11 +51,17 @@ impl MyBot {
             .timeout(Duration::from_secs(600))
             .build()
             .expect("Client creation failed");
-        let tg = Arc::new(Bot::with_client(
-            config.telegram_bot_token.expose_secret(),
-            client,
-        ));
+        let mut tg = Bot::with_client(config.telegram_bot_token.expose_secret(), client);
+        if let Some(url) = env::var_os(TELEGRAM_BOT_API_URL_ENV) {
+            tg = tg.set_api_url(
+                Url::parse(url.to_str().expect("Unicode string expected"))
+                    .expect("Bot api must be a url"),
+            );
+        }
+
         tg.set_my_commands(Command::bot_commands()).await?;
+
+        let tg = Arc::new(tg);
 
         let handler = dptree::entry()
             .branch(
@@ -89,10 +98,7 @@ impl MyBot {
             ))
             .build();
 
-        let my_bot = MyBot {
-            dispatcher,
-            tg: tg.clone(),
-        };
+        let my_bot = MyBot { dispatcher, tg };
         Ok(my_bot)
     }
 
