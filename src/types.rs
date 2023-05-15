@@ -6,6 +6,7 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct Video {
     pub path: PathBuf,
+    pub title: String,
     pub width: u16,
     pub height: u16,
 }

@@ -21,7 +21,11 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
         "--output".into(),
         // To get telegram show correct aspect ratio for video, we need the dimensions and simplest
         // way to make that happens is have yt-dlp write them in the filename.
-        "video_%(width)sx%(height)s.%(ext)s".into(),
+        "%(title)s_%(width)sx%(height)s.%(ext)s".into(),
+        "-S".into(),
+        "res,ext:mp4:m4a".into(),
+        "--recode".into(),
+        "mp4".into(),
         url.into(),
     ]
 }
@@ -58,46 +62,78 @@ pub fn download(url: &str) -> Result<Video> {
         .next()
         .expect("video file in temp dir");
 
-    let dimensions =
-        parse_dimensions_from_path(&video_path).expect("video filename should have dimensions");
+    let metadata =
+        parse_metadata_from_path(&video_path).expect("video filename should have dimensions");
 
     let video = Video {
         path: video_path,
-        width: dimensions.0,
-        height: dimensions.1,
+        title: metadata.0,
+        width: metadata.1,
+        height: metadata.2,
     };
 
     Ok(video)
 }
 
-fn parse_dimensions_from_path(path: &Path) -> Option<(u16, u16)> {
+fn parse_metadata_from_path(path: &Path) -> Option<(String, u16, u16)> {
     lazy_static! {
-        static ref RE: Regex = Regex::new(r"_(?P<width>\d+)x(?P<height>\d+)\.").unwrap();
+        static ref RE: Regex =
+            Regex::new(r"(?P<title>.*)_(?P<width>\d+)x(?P<height>\d+)\.").unwrap();
     }
 
-    let path_str = path.to_string_lossy();
-    let caps = RE.captures(&path_str)?;
+    let filename_str = path
+        .file_name()
+        .expect("file should have a stem")
+        .to_string_lossy();
+
+    let caps = RE.captures(&filename_str)?;
+
+    let title = caps.name("title")?.as_str().to_string();
     let width = caps.name("width")?.as_str().parse::<u16>().ok()?;
     let height = caps.name("height")?.as_str().parse::<u16>().ok()?;
 
-    Some((width, height))
+    Some((title, width, height))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dimensions_from_path;
+    use super::parse_metadata_from_path;
     use std::path::Path;
 
     #[test]
-    fn test_parse_dimensions_from_path() {
+    fn test_parse_metadata_from_path() {
         assert_eq!(
-            parse_dimensions_from_path(Path::new("/foo/bar/video_1920x1080.mp4")),
-            Some((1920, 1080))
+            parse_metadata_from_path(Path::new("/foo/bar/video_1920x1080.mp4")),
+            Some(("video".into(), 1920, 1080))
         );
 
         assert_eq!(
-            parse_dimensions_from_path(Path::new("/foo/bar/video_asdfax1080.mp4")),
+            parse_metadata_from_path(Path::new("/foo/bar/someothervideo_asdfax1080.mp4")),
             None,
+        );
+
+        // Testing a case where title includes underscores
+        assert_eq!(
+            parse_metadata_from_path(Path::new("/foo/bar/cool_video_1280x720.mp4")),
+            Some(("cool_video".into(), 1280, 720))
+        );
+
+        // Testing a case where title includes special characters
+        assert_eq!(
+            parse_metadata_from_path(Path::new("/foo/bar/awesome#video!_640x480.mp4")),
+            Some(("awesome#video!".into(), 640, 480))
+        );
+
+        // Testing a case where dimensions are not in the standard format
+        assert_eq!(
+            parse_metadata_from_path(Path::new("/foo/bar/video_1920_1080.mp4")),
+            None,
+        );
+
+        // Testing a case where there is no title
+        assert_eq!(
+            parse_metadata_from_path(Path::new("/foo/bar/_1920x1080.mp4")),
+            Some(("".into(), 1920, 1080))
         );
     }
 }
