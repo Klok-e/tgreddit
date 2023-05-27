@@ -23,7 +23,7 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
         // way to make that happens is have yt-dlp write them in the filename.
         "%(title)s_[%(id)s]_%(width)sx%(height)s.%(ext)s".into(),
         "-f".into(),
-        "bv[height<=1080]+ba".into(),
+        "bv[height<=1080]+ba/best".into(),
         "-S".into(),
         "res,ext:mp4:m4a".into(),
         "--recode".into(),
