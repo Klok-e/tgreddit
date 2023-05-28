@@ -21,7 +21,9 @@ pub async fn handle_video_link(
     chat_id: i64,
     link: &Url,
 ) -> Result<()> {
-    let video = tokio::task::block_in_place(|| ytdlp::download(link.as_str()))?;
+    let video = tokio::task::block_in_place(|| ytdlp::download(link.as_str()))
+        .context("Failed to download video from link")?;
+
     db.record_post_seen_with_current_time(chat_id, &video)?;
 
     info!("got a video: {video:?}");
@@ -46,7 +48,9 @@ async fn handle_new_video_post(
     chat_id: i64,
     post: &reddit::Post,
 ) -> Result<()> {
-    let video = tokio::task::block_in_place(|| ytdlp::download(&post.url))?;
+    let video = tokio::task::block_in_place(|| ytdlp::download(&post.url))
+        .context("Failed to download video from post")?;
+
     info!("got a video: {video:?}");
     let caption = messages::format_media_caption_html(post, config.links_base_url.as_deref());
     tg.send_video(ChatId(chat_id), InputFile::file(&video.path))
