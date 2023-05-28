@@ -1,12 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use duct::cmd;
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::info;
 use std::{
     ffi::OsString,
     fs,
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::types::*;
@@ -42,42 +42,42 @@ pub fn download(url: &str) -> Result<Video> {
 
     info!("running yt-dlp with arguments {:?}", ytdlp_args);
     let duct_exp = cmd("yt-dlp", ytdlp_args).stderr_to_stdout();
-    let reader = match duct_exp.reader() {
-        Ok(child) => child,
-        Err(err) => {
-            error!("failed to run yt-dlp:\n{}", err);
-            return Err(anyhow::anyhow!(err));
-        }
-    };
+    let reader = duct_exp.reader().context("Failed to run yt-dlp")?;
 
-    let lines = BufReader::new(reader).lines();
-    for line_result in lines {
-        match line_result {
-            Ok(line) => info!("{line}"),
-            Err(_) => panic!("failed to read line"),
-        }
-    }
+    log_output(BufReader::new(reader))?;
 
     // yt-dlp is expected to write a single file, which is the video, to tmp_path
-    let video_path = fs::read_dir(tmp_path)
-        .expect("could not read files in temp dir")
-        .map(|de| de.unwrap().path())
-        .next()
-        .expect("video file in temp dir");
+    let video_path = get_video_path(&tmp_path)?;
 
-    let metadata =
-        parse_metadata_from_path(&video_path).expect("video filename should have dimensions");
+    let (title, id, width, height) =
+        parse_metadata_from_path(&video_path).context("Video filename should have dimensions")?;
 
     let video = Video {
         path: video_path,
         url: url.to_owned(),
-        title: metadata.0,
-        id: metadata.1,
-        width: metadata.2,
-        height: metadata.3,
+        title,
+        id,
+        width,
+        height,
     };
 
     Ok(video)
+}
+
+/// Log each line of output from a reader.
+fn log_output<R: BufRead>(reader: R) -> Result<()> {
+    for line_result in reader.lines() {
+        let line = line_result.context("Failed to read line from yt-dlp output")?;
+        info!("{}", line);
+    }
+    Ok(())
+}
+
+/// Get the path to the video file in a directory.
+fn get_video_path(dir: &Path) -> Result<PathBuf> {
+    let mut entries = fs::read_dir(dir).context("Could not read files in temp dir")?;
+    let video_entry = entries.next().context("No video file in temp dir")?;
+    Ok(video_entry?.path())
 }
 
 fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
