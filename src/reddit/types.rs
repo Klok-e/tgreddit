@@ -72,8 +72,8 @@ pub struct MediaMetadata {
     pub status: String,
     pub e: String,
     #[serde(rename = "m")]
-    pub mime: String,
-    pub s: Media,
+    pub mime: Option<String>,
+    pub s: Option<Media>,
 }
 
 #[derive(Debug, Clone)]

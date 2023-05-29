@@ -133,7 +133,10 @@ async fn download_gallery(post: &reddit::Post) -> Result<HashMap<String, (PathBu
 
     let mut map: HashMap<String, (PathBuf, TempDir)> = HashMap::new();
     for (id, media_metadata) in media_metadata_map {
-        let s = &media_metadata.s;
+        let s = media_metadata
+            .s
+            .as_ref()
+            .context("Media metadata not available")?;
         let url = &s.url.replace("&amp;", "&");
         info!("got media id={id} x={} y={} url={}", &s.x, &s.y, url);
         map.insert(id.to_string(), download_url_to_tmp(url).await?);
