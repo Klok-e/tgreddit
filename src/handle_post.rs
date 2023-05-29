@@ -4,10 +4,10 @@ use anyhow::{Context, Result};
 use log::*;
 use url::Url;
 
-use std::collections::HashMap;
 use std::string::ToString;
 use std::{borrow::Cow, path::PathBuf};
-use teloxide::types::InputFile;
+use std::{collections::HashMap, path::Path};
+use teloxide::types::{InputFile, InputMediaVideo};
 use teloxide::{
     payloads::{SendMessageSetters, SendPhotoSetters, SendVideoSetters},
     types::InputMediaPhoto,
@@ -78,12 +78,23 @@ async fn handle_new_image_post(
             // path will be deleted when _tmp_dir when goes out of scope
             let caption =
                 messages::format_media_caption_html(post, config.links_base_url.as_deref());
-            tg.send_photo(ChatId(chat_id), InputFile::file(path))
-                .parse_mode(teloxide::types::ParseMode::Html)
-                .caption(&caption)
-                .reply_markup(messages::format_repost_buttons(post))
-                .await?;
-            info!("image uploaded post_id={} chat_id={chat_id}", post.id);
+            if is_gif(&path) {
+                tg.send_video(ChatId(chat_id), InputFile::file(path))
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .caption(&caption)
+                    .reply_markup(messages::format_repost_buttons(post))
+                    .await?;
+
+                info!("gif uploaded post_id={} chat_id={chat_id}", post.id);
+            } else {
+                tg.send_photo(ChatId(chat_id), InputFile::file(path))
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .caption(&caption)
+                    .reply_markup(messages::format_repost_buttons(post))
+                    .await?;
+
+                info!("image uploaded post_id={} chat_id={chat_id}", post.id);
+            }
             Ok(())
         }
         Err(e) => {
@@ -166,18 +177,33 @@ async fn handle_new_gallery_post(
         let file = gallery_files_map.get(&item.media_id);
         match file {
             Some((image_path, _tempdir)) => {
-                let mut input_media_photo = InputMediaPhoto::new(InputFile::file(image_path));
-                // The first InputMediaPhoto in the vector needs to contain the caption and parse_mode;
-                if first {
-                    let caption =
-                        messages::format_media_caption_html(post, config.links_base_url.as_deref());
-                    input_media_photo = input_media_photo
-                        .caption(&caption)
-                        .parse_mode(teloxide::types::ParseMode::Html);
-                    first = false;
+                if is_gif(image_path) {
+                    let mut input_media_video = InputMediaVideo::new(InputFile::file(image_path));
+                    if first {
+                        let caption = messages::format_media_caption_html(
+                            post,
+                            config.links_base_url.as_deref(),
+                        );
+                        input_media_video = input_media_video
+                            .caption(&caption)
+                            .parse_mode(teloxide::types::ParseMode::Html);
+                        first = false;
+                    }
+                    media_group.push(InputMedia::Video(input_media_video));
+                } else {
+                    let mut input_media_photo = InputMediaPhoto::new(InputFile::file(image_path));
+                    if first {
+                        let caption = messages::format_media_caption_html(
+                            post,
+                            config.links_base_url.as_deref(),
+                        );
+                        input_media_photo = input_media_photo
+                            .caption(&caption)
+                            .parse_mode(teloxide::types::ParseMode::Html);
+                        first = false;
+                    }
+                    media_group.push(InputMedia::Photo(input_media_photo));
                 }
-
-                media_group.push(InputMedia::Photo(input_media_photo))
             }
             None => {
                 error!("could not find downloaded image for gallery data item: {item:?}");
@@ -188,13 +214,17 @@ async fn handle_new_gallery_post(
     let gallery_msg = tg.send_media_group(ChatId(chat_id), media_group).await?;
     let db = db::Database::open(config)?;
     for msg in gallery_msg {
-        let file_meta = &msg
-            .photo()
-            .expect("Photo expected")
-            .iter()
-            .max_by_key(|x| x.file.size)
-            .expect("There must be at least one element")
-            .file;
+        let file_meta = if let Some(video) = msg.video() {
+            &video.file
+        } else if let Some(photo) = msg.photo() {
+            &photo
+                .iter()
+                .max_by_key(|x| x.file.size)
+                .expect("There must be at least one element")
+                .file
+        } else {
+            panic!("Neither photo nor video found in message");
+        };
         db.add_telegram_file(&post.id, chat_id, &file_meta.id, &file_meta.unique_id)?;
     }
 
@@ -263,4 +293,10 @@ pub async fn handle_new_post(
             handle_new_link_post(config, tg, chat_id, &post).await
         }
     }
+}
+
+fn is_gif(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str().map(|x| x == "gif"))
+        .unwrap_or(false)
 }
