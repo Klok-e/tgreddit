@@ -21,7 +21,7 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
         "--output".into(),
         // To get telegram show correct aspect ratio for video, we need the dimensions and simplest
         // way to make that happens is have yt-dlp write them in the filename.
-        "%(title)s_[%(id)s]_%(width)sx%(height)s.%(ext)s".into(),
+        "%(title).200B_[%(id)s]_%(width)sx%(height)s.%(ext)s".into(),
         "-f".into(),
         "bv[height<=1080]+ba/best".into(),
         "-S".into(),
