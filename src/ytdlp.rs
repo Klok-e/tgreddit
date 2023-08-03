@@ -36,9 +36,8 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
 /// Downloads given url with yt-dlp and returns path to video
 pub fn download(url: &str) -> Result<Video> {
     let tmp_dir = TempDir::new("tgreddit")?;
-    // Convert to path to avoid tmp dir from getting deleted when it goes out of scope
-    let tmp_path = tmp_dir.into_path();
-    let ytdlp_args = make_ytdlp_args(&tmp_path, url);
+    let tmp_path = tmp_dir.path();
+    let ytdlp_args = make_ytdlp_args(tmp_path, url);
 
     info!("running yt-dlp with arguments {:?}", ytdlp_args);
     let duct_exp = cmd("yt-dlp", ytdlp_args).stderr_to_stdout();
@@ -47,7 +46,7 @@ pub fn download(url: &str) -> Result<Video> {
     log_output(BufReader::new(reader))?;
 
     // yt-dlp is expected to write a single file, which is the video, to tmp_path
-    let video_path = get_video_path(&tmp_path)?;
+    let video_path = get_video_path(tmp_path)?;
 
     let (title, id, width, height) =
         parse_metadata_from_path(&video_path).context("Video filename should have dimensions")?;
@@ -59,6 +58,9 @@ pub fn download(url: &str) -> Result<Video> {
         id,
         width,
         height,
+        // return temp dir with the video so that when Video goes out of scope tempdir is deleted
+        // but not at the end of this scope
+        video_tempdir: tmp_dir,
     };
 
     Ok(video)

@@ -1,4 +1,5 @@
 use serde_derive::{Deserialize, Serialize};
+use tempdir::TempDir;
 
 use crate::{
     db::Recordable,
@@ -14,6 +15,7 @@ pub struct Video {
     pub title: String,
     pub width: u16,
     pub height: u16,
+    pub video_tempdir: TempDir,
 }
 
 impl Recordable for Video {

@@ -255,11 +255,8 @@ async fn handle_repost(
     caption: Option<String>,
 ) -> Result<()> {
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
-        tg.send_message(
-            chat_id,
-            "Repost channel not registered".to_string(),
-        )
-        .await?;
+        tg.send_message(chat_id, "Repost channel not registered".to_string())
+            .await?;
         return Ok(());
     };
     let caption = if let Some(caption) = &caption {
@@ -299,11 +296,8 @@ async fn handle_repost_gallery(
     }
 
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
-        tg.send_message(
-            chat_id,
-            "Repost channel not registered".to_string(),
-        )
-        .await?;
+        tg.send_message(chat_id, "Repost channel not registered".to_string())
+            .await?;
         return Ok(());
     };
 
