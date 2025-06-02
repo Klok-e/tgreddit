@@ -10,7 +10,7 @@ pub fn parse_args() -> getopts::Matches {
     match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {
-            error!("{}", f);
+            error!("{f}");
             std::process::exit(1);
         }
     }

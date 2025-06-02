@@ -39,7 +39,7 @@ pub fn download(url: &str) -> Result<Video> {
     let tmp_path = tmp_dir.path();
     let ytdlp_args = make_ytdlp_args(tmp_path, url);
 
-    info!("running yt-dlp with arguments {:?}", ytdlp_args);
+    info!("running yt-dlp with arguments {ytdlp_args:?}");
     let duct_exp = cmd("yt-dlp", ytdlp_args).stderr_to_stdout();
     let reader = duct_exp.reader().context("Failed to run yt-dlp")?;
 
@@ -60,7 +60,7 @@ pub fn download(url: &str) -> Result<Video> {
         height,
         // return temp dir with the video so that when Video goes out of scope tempdir is deleted
         // but not at the end of this scope
-        video_tempdir: tmp_dir,
+        _video_tempdir: tmp_dir,
     };
 
     Ok(video)
@@ -70,7 +70,7 @@ pub fn download(url: &str) -> Result<Video> {
 fn log_output<R: BufRead>(reader: R) -> Result<()> {
     for line_result in reader.lines() {
         let line = line_result.context("Failed to read line from yt-dlp output")?;
-        info!("{}", line);
+        info!("{line}");
     }
     Ok(())
 }

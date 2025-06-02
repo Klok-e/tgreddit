@@ -2,6 +2,7 @@ use crate::{handle_post::handle_video_link, *};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
+use secrecy::ExposeSecret;
 use std::{env, sync::Arc};
 use teloxide::{
     dispatching::DefaultKey,
@@ -67,7 +68,7 @@ impl MyBot {
             .branch(
                 Update::filter_message().branch(
                     dptree::filter(|msg: Message, config: Arc<config::Config>| {
-                        msg.from()
+                        msg.from
                             .map(|user| config.authorized_user_ids.contains(&user.id.0))
                             .unwrap_or_default()
                     })
@@ -91,7 +92,7 @@ impl MyBot {
         let dispatcher = Dispatcher::builder(tg.clone(), handler)
             .dependencies(dptree::deps![config.clone()])
             .default_handler(|upd| async move {
-                warn!("unhandled update: {:?}", upd);
+                warn!("unhandled update: {upd:?}");
             })
             .error_handler(LoggingErrorHandler::with_custom_text(
                 "an error has occurred in the dispatcher",
@@ -149,8 +150,8 @@ pub async fn handle_no_command(
         Ok(())
     }
     if let Err(err) = handle(&message, &tg, &config).await {
-        error!("failed to handle message: {:?}", err);
-        tg.send_message(message.chat.id, format!("Something went wrong: {}", err))
+        error!("failed to handle message: {err:?}");
+        tg.send_message(message.chat.id, format!("Something went wrong: {err}"))
             .await?;
     }
 
@@ -239,7 +240,7 @@ pub async fn handle_command(
     }
 
     if let Err(err) = handle(&message, &tg, command, config).await {
-        error!("failed to handle message: {:?}", err);
+        error!("failed to handle message: {err:?}");
         tg.send_message(message.chat.id, "Something went wrong")
             .await?;
     }
@@ -413,22 +414,26 @@ async fn callback_handler(
     let data = q.data.expect("Data expected");
     let data: ButtonCallbackData = serde_json::from_str(&data)?;
     let caption = if data.copy_caption {
-        Some(db.get_post_title(msg.chat.id.0, &data.post_id)?)
+        Some(db.get_post_title(msg.chat().id.0, &data.post_id)?)
     } else {
         None
     };
-    let msg_id = if let Some(reply_id) = msg.reply_to_message() {
-        reply_id.id
+    let msg_id = if let Some(reply_id) = msg
+        .regular_message()
+        .and_then(|x| x.reply_to_message())
+        .map(|x| x.id)
+    {
+        reply_id
     } else {
-        msg.id
+        msg.id()
     };
     if data.is_gallery {
-        let tg_file_ids = db.get_telegram_files_for_post(&data.post_id, msg.chat.id.0)?;
-        handle_repost_gallery(db, msg.chat.id, &tg, tg_file_ids, caption)
+        let tg_file_ids = db.get_telegram_files_for_post(&data.post_id, msg.chat().id.0)?;
+        handle_repost_gallery(db, msg.chat().id, &tg, tg_file_ids, caption)
             .await
             .context("Failed handling gallery repost")?;
     } else {
-        handle_repost(db, msg.chat.id, &tg, msg_id.0, caption)
+        handle_repost(db, msg.chat().id, &tg, msg_id.0, caption)
             .await
             .context("Failed handling repost")?;
     }

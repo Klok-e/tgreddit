@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     let opts = args::parse_args();
     if let Some(post_id) = opts.opt_str("debug-post") {
         let post = reddit::get_link(&post_id).await.unwrap();
-        info!("{:#?}", post);
+        info!("{post:#?}");
         if let Some(chat_id) = opts.opt_str("chat-id") {
             let db = db::Database::open(&config)?;
             let chat_id = chat_id.parse().unwrap();
@@ -199,7 +199,7 @@ async fn check_new_posts_for_subscription(
             }
         }
         Err(e) => {
-            error!("failed to get posts for {}: {e:?}", subreddit)
+            error!("failed to get posts for {subreddit}: {e:?}")
         }
     };
 

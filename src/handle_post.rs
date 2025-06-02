@@ -113,7 +113,6 @@ async fn handle_new_link_post(
     let message_html = messages::format_link_message_html(post, config.links_base_url.as_deref());
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .disable_web_page_preview(false)
         .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
@@ -129,7 +128,6 @@ async fn handle_new_self_post(
     let message_html = messages::format_media_caption_html(post, config.links_base_url.as_deref());
     tg.send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .disable_web_page_preview(true)
         .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);

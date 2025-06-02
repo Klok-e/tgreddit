@@ -82,13 +82,13 @@ pub fn format_subscription_list(post: &[Subscription]) -> String {
     fn format_subscription(sub: &Subscription) -> String {
         let mut args = vec![];
         if let Some(time) = sub.time {
-            args.push(format!("time={}", time));
+            args.push(format!("time={time}"));
         }
         if let Some(limit) = sub.limit {
-            args.push(format!("limit={}", limit));
+            args.push(format!("limit={limit}"));
         }
         if let Some(filter) = sub.filter {
-            args.push(format!("filter={}", filter));
+            args.push(format!("filter={filter}"));
         }
 
         let args_str = if !args.is_empty() {

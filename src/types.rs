@@ -15,7 +15,7 @@ pub struct Video {
     pub title: String,
     pub width: u16,
     pub height: u16,
-    pub video_tempdir: TempDir,
+    pub _video_tempdir: TempDir,
 }
 
 impl Recordable for Video {

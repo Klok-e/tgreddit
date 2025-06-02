@@ -44,7 +44,7 @@ pub async fn get_subreddit_top_posts(
         .get(url)
         .query(&[
             ("limit", &limit.to_string()),
-            ("t", &format!("{:?}", time).to_lowercase()),
+            ("t", &format!("{time:?}").to_lowercase()),
         ])
         .send()
         .await?
