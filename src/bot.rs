@@ -6,7 +6,7 @@ use secrecy::ExposeSecret;
 use std::{env, sync::Arc};
 use teloxide::{
     dispatching::DefaultKey,
-    types::MessageId,
+    types::{FileId, MessageId},
     utils::command::{BotCommands, ParseError},
 };
 use url::Url;
@@ -276,7 +276,7 @@ async fn handle_repost_gallery(
     db: db::Database,
     chat_id: ChatId,
     tg: &Bot,
-    gallery_file_ids: Vec<String>,
+    gallery_file_ids: Vec<FileId>,
     post_caption: Option<String>,
 ) -> Result<()> {
     let mut media_group = vec![];

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
 use std::{convert::TryFrom, sync::Mutex};
+use teloxide::types::{FileId, FileUniqueId};
 
 const MIGRATIONS: &[&str] = &[
     "
@@ -438,8 +439,8 @@ impl Database {
         &self,
         post_id: &str,
         chat_id: i64,
-        telegram_file_id: &str,
-        telegram_unique_file_id: &str,
+        telegram_file_id: &FileId,
+        telegram_unique_file_id: &FileUniqueId,
     ) -> Result<()> {
         let conn = &self.conn.lock().expect("No poison");
         let mut stmt = conn.prepare(
@@ -451,14 +452,14 @@ impl Database {
         stmt.execute(named_params! {
             ":post_id": post_id,
             ":chat_id": chat_id,
-            ":telegram_file_id": telegram_file_id,
-            ":telegram_file_unique_id": telegram_unique_file_id,
+            ":telegram_file_id": telegram_file_id.0,
+            ":telegram_file_unique_id": telegram_unique_file_id.0,
         })
         .context("could not add telegram file")
         .map(|_| ())
     }
 
-    pub fn get_telegram_files_for_post(&self, post_id: &str, chat_id: i64) -> Result<Vec<String>> {
+    pub fn get_telegram_files_for_post(&self, post_id: &str, chat_id: i64) -> Result<Vec<FileId>> {
         let conn = &self.conn.lock().expect("No poison");
         let mut stmt = conn.prepare(
             "
@@ -480,7 +481,7 @@ impl Database {
             .context("could not retrieve telegram files")?;
 
         let telegram_files: Result<Vec<String>, _> = rows.collect();
-        Ok(telegram_files?)
+        Ok(telegram_files?.into_iter().map(|x| x.into()).collect())
     }
 }
 
