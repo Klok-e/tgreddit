@@ -6,38 +6,38 @@ description = "Get the top posts of your favorite subreddits to Telegram"
 license = "MIT"
 
 [dependencies]
-anyhow = "1.0.64"
-chrono = "0.4.22"
-duct = "1.0.0"
+anyhow = "1.0.100"
+chrono = "0.4.42"
+duct = "1.1.1"
 env_logger = "0.11.8"
-getopts = "0.2.21"
+getopts = "0.2.24"
 itertools = "0.14.0"
-lazy_static = "1.4.0"
-log = "0.4.17"
-regex = { version = "1.6.0", default-features = false, features = [
+lazy_static = "1.5.0"
+log = "0.4.29"
+regex = { version = "1.12.2", default-features = false, features = [
     "std",
     "unicode-perl",
 ] }
-rusqlite = { version = "0.35.0", features = ["chrono", "bundled"] }
-rusqlite_migration = "2.1.0"
+rusqlite = { version = "0.37.0", features = ["chrono", "bundled"] }
+rusqlite_migration = "2.3.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.144", features = ["derive"] }
 serde_derive = "1.0.144"
 serde_json = "1.0.85"
-signal-hook = "0.3.14"
+signal-hook = "0.4.1"
 strum = "0.27.1"
 strum_macros = "0.27.1"
 teloxide = { version = "0.15.0", features = ["macros"] }
-tempdir = "0.3.7"
+tempfile = "3.24.0"
 thiserror = "2.0.12"
 tokio = { version = "1.21.0", features = ["rt-multi-thread", "macros", "sync"] }
-toml = "0.8.22"
-url = "2.2.2"
+toml = "0.9.10"
+url = "2.5.7"
 xdg = "3.0.0"
-reqwest = { version = "0.12.19", features = ["json"] }
+reqwest = { version = "0.12.28", features = ["json"] }
 
 # Use vendored openssl. We don't depend on it directly.
-openssl = { version = "0.10.41", features = ["vendored"], optional = true }
+openssl = { version = "0.10.75", features = ["vendored"], optional = true }
 
 [features]
 vendored-openssl = ["openssl"]

@@ -1,5 +1,5 @@
 use serde_derive::{Deserialize, Serialize};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use crate::{
     db::Recordable,

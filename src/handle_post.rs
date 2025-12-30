@@ -13,7 +13,7 @@ use teloxide::{
     types::InputMediaPhoto,
 };
 use teloxide::{prelude::*, types::InputMedia};
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 pub async fn handle_video_link(
     db: &db::Database,

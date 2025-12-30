@@ -12,7 +12,7 @@ use std::{
 use crate::types::*;
 
 use regex::Regex;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
     vec![
@@ -35,7 +35,7 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
 
 /// Downloads given url with yt-dlp and returns path to video
 pub fn download(url: &str) -> Result<Video> {
-    let tmp_dir = TempDir::new("tgreddit")?;
+    let tmp_dir = TempDir::new_in("tgreddit")?;
     let tmp_path = tmp_dir.path();
     let ytdlp_args = make_ytdlp_args(tmp_path, url);
 
