@@ -16,6 +16,8 @@ use tempfile::TempDir;
 
 fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
     vec![
+        "--impersonate".into(),
+        "Firefox-135".into(),
         "--paths".into(),
         output.into(),
         "--output".into(),
