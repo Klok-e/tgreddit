@@ -14,7 +14,7 @@ use url::Url;
 pub async fn download_url_to_tmp(url: &str) -> Result<(PathBuf, TempDir)> {
     info!("downloading {url}");
     let mut res = reqwest::get(url).await?;
-    let tmp_dir = TempDir::new_in("tgreddit")?;
+    let tmp_dir = TempDir::with_prefix("tgreddit")?;
     let parsed_url = Url::parse(url)?;
     let tmp_filename = Path::new(parsed_url.path())
         .file_name()
