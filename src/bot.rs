@@ -1,4 +1,4 @@
-use crate::{handle_post::handle_video_link, *};
+use crate::{handle_post::{handle_new_post, handle_video_link}, *};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -144,7 +144,9 @@ pub async fn handle_no_command(
                 .context("Couldn't find reddit post id")?
                 .as_str();
             let post = reddit::get_link(id).await?;
-            process_post(&db, message.chat.id.0, &post, config, tg).await?;
+            let chat_id = message.chat.id.0;
+            db.record_post_seen_with_current_time(chat_id, &post)?;
+            handle_new_post(config, tg, chat_id, &post).await?;
         }
 
         Ok(())
