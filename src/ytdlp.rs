@@ -5,7 +5,6 @@ use log::info;
 use std::{
     ffi::OsString,
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -42,10 +41,21 @@ pub fn download(url: &str) -> Result<Video> {
     let ytdlp_args = make_ytdlp_args(tmp_path, url);
 
     info!("running yt-dlp with arguments {ytdlp_args:?}");
-    let duct_exp = cmd("yt-dlp", ytdlp_args).stderr_to_stdout();
-    let reader = duct_exp.reader().context("Failed to run yt-dlp")?;
+    let output = cmd("yt-dlp", ytdlp_args)
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .context("Failed to run yt-dlp")?;
 
-    log_output(BufReader::new(reader))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        info!("{line}");
+    }
+
+    if !output.status.success() {
+        anyhow::bail!("yt-dlp failed with {}: {}", output.status, stdout.trim());
+    }
 
     // yt-dlp is expected to write a single file, which is the video, to tmp_path
     let video_path = get_video_path(tmp_path)?;
@@ -66,15 +76,6 @@ pub fn download(url: &str) -> Result<Video> {
     };
 
     Ok(video)
-}
-
-/// Log each line of output from a reader.
-fn log_output<R: BufRead>(reader: R) -> Result<()> {
-    for line_result in reader.lines() {
-        let line = line_result.context("Failed to read line from yt-dlp output")?;
-        info!("{line}");
-    }
-    Ok(())
 }
 
 /// Get the path to the video file in a directory.

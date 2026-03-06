@@ -1,4 +1,7 @@
-use crate::{handle_post::{handle_new_post, handle_video_link}, *};
+use crate::{
+    handle_post::{handle_new_post, handle_video_link},
+    *,
+};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
