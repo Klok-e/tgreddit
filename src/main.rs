@@ -11,8 +11,8 @@ use signal_hook::{
 use std::string::ToString;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };

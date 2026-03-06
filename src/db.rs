@@ -1,11 +1,11 @@
 use crate::{config::*, reddit::*, types::*};
 use anyhow::{Context, Result};
-use rusqlite::{named_params, Connection, Row};
+use rusqlite::{Connection, Row, named_params};
 use rusqlite::{
-    types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef},
     OptionalExtension,
+    types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef},
 };
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{M, Migrations};
 use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
@@ -492,13 +492,13 @@ pub trait Recordable {
 }
 
 impl ToSql for TopPostsTimePeriod {
-    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput, rusqlite::Error> {
+    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput<'_>, rusqlite::Error> {
         Ok(ToSqlOutput::Owned(Value::Text(self.to_string())))
     }
 }
 
 impl ToSql for PostType {
-    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput, rusqlite::Error> {
+    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput<'_>, rusqlite::Error> {
         Ok(ToSqlOutput::Owned(Value::Text(self.to_string())))
     }
 }
