@@ -1,92 +1,88 @@
 Status: ready-for-agent
 
-# Reddit HTML Scraping PRD
+# Redlib-Style Reddit OAuth JSON PRD
 
 ## Problem Statement
 
-The bot currently fails before Telegram media handling because Reddit returns `403 text/html` for JSON Data API reads used to fetch subreddit top posts, direct post details, and subreddit metadata. Browser-like headers and cookie prefetch do not restore JSON/API access.
+The bot currently fails before Telegram media handling because Reddit returns `403 text/html` for unauthenticated JSON Data API reads used to fetch subreddit top posts, direct post details, and subreddit metadata.
 
-Public old Reddit HTML pages still return successful listing pages for the same subreddit top feeds. The user needs subscribed feed delivery restored without adding browser automation, OAuth, or a large rewrite of downstream Telegram/media behavior.
+HTML scraping, headless browser rendering, and public Reddit frontends were explored as alternatives, but they either fail from this network, do not provide reliable parity, or add too much operational fragility. The user wants one implementation path with parity to current behavior and no fallback stack.
 
 ## Solution
 
-Replace Reddit JSON reads with old Reddit HTML scraping for public subreddit top feeds and direct post lookup. Parse old Reddit listing/post HTML into the existing internal post shape, classify scraped posts conservatively, and keep the existing Telegram delivery paths for images, videos, links, and self posts.
+Replace unauthenticated Reddit JSON requests with a clean-room Redlib-style OAuth JSON transport. The bot should obtain an anonymous Reddit bearer token using the same Android-client-style OAuth flow Redlib uses, then call `https://oauth.reddit.com` JSON endpoints with app-like headers.
 
-Every scraped post should carry enough post classification metadata to avoid the current direct-link enrichment path that calls blocked Reddit API endpoints. When metadata is incomplete, the bot should degrade to link delivery and log a clear reason instead of panicking.
+Keep the existing Reddit JSON data model and Telegram delivery behavior. The source remains Reddit JSON, not HTML scraping and not a public Redlib instance.
 
 ## User Stories
 
-1. As a bot operator, I want subscribed subreddit top feeds to work again, so that Reddit API `403` responses do not stop the bot from delivering posts.
-2. As a Telegram chat member, I want image posts from subscribed subreddits to appear as Telegram photos, so that normal feed behavior is restored.
-3. As a Telegram chat member, I want downloadable video posts to continue using the existing video delivery path, so that media posts remain convenient to view.
-4. As a Telegram chat member, I want external link posts to arrive as link messages, so that non-media Reddit posts are still visible.
-5. As a Telegram chat member, I want self posts to arrive as text/link messages, so that discussion posts are not silently skipped.
-6. As a Telegram chat member, I want unsupported gallery posts to arrive as links, so that galleries do not crash or disappear while full gallery extraction is deferred.
-7. As a bot operator, I want direct Reddit post lookup to work through old Reddit HTML, so that debug and repost workflows can still fetch a post by id.
-8. As a bot operator, I want subreddit subscription validation to avoid blocked JSON endpoints, so that `/sub` does not fail only because `/about.json` is blocked.
-9. As a bot operator, I want malformed old Reddit pages to produce clear errors, so that access gates and selector breakage are diagnosable from logs.
-10. As a bot operator, I want promoted posts skipped, so that ad-like listing entries are not delivered as normal subreddit content.
-11. As a bot operator, I want empty or malformed entries skipped, so that partial HTML nodes do not crash polling.
-12. As a bot operator, I want request volume to stay low, so that scraping only replaces existing polling reads and does not add aggressive retries.
-13. As a maintainer, I want scraping isolated behind existing Reddit fetch functions, so that bot, database, and Telegram code stay mostly unchanged.
-14. As a maintainer, I want a pure parser for old Reddit listing HTML, so that selector behavior can be tested without network access.
-15. As a maintainer, I want a pure parser for old Reddit direct-post HTML, so that direct lookup can be tested with deterministic fixtures.
-16. As a maintainer, I want a pure classifier for scraped post attributes, so that image/video/link/self/gallery rules are explicit and covered by tests.
-17. As a maintainer, I want gallery classification to be conservative, so that missing gallery metadata cannot trigger existing gallery panics.
-18. As a maintainer, I want failed enrichment to be non-fatal, so that a single blocked or malformed direct post page does not stop post handling.
-19. As a maintainer, I want debug logs for fetched URL, status, content type, parsed count, and classification, so that future Reddit changes can be diagnosed quickly.
-20. As a maintainer, I want no normal tests to hit live Reddit, so that CI and local test runs stay deterministic.
-21. As a maintainer, I want existing internal post formatting and repost buttons preserved, so that user-visible Telegram messages remain consistent.
-22. As a maintainer, I want old Reddit HTML checks to detect login/interstitial/no-subreddit pages, so that failures are explicit rather than misclassified as empty feeds.
-23. As a deployer, I want runtime verification commands to confirm old Reddit HTML works on the target host, so that local success does not hide deployment network differences.
-24. As a deployer, I want logs to prove no blocked JSON endpoints are used in normal polling, so that the fix can be verified after restart.
+1. As a bot operator, I want subscribed subreddit top feeds to work again, so that unauthenticated Reddit `403` responses do not stop post delivery.
+2. As a Telegram chat member, I want image posts to continue arriving as Telegram photos, so that current feed behavior is preserved.
+3. As a Telegram chat member, I want hosted video posts to continue using the existing video delivery path, so that current media behavior is preserved.
+4. As a Telegram chat member, I want external link posts to continue arriving as link messages, so that non-media Reddit posts remain visible.
+5. As a Telegram chat member, I want self posts to continue arriving as text/link messages, so that discussion posts are not skipped.
+6. As a Telegram chat member, I want gallery posts to continue arriving through the existing gallery media path, so that parity with current JSON behavior is preserved.
+7. As a bot operator, I want direct Reddit post lookup to keep working, so that debug and repost workflows can fetch a post by id.
+8. As a bot operator, I want subreddit subscription validation to keep working, so that `/sub` still rejects nonexistent or inaccessible subreddits.
+9. As a bot operator, I want Reddit auth/token failures to produce clear logs, so that runtime failures are diagnosable from service logs.
+10. As a bot operator, I want token refresh to happen automatically, so that the bot can run longer than one token lifetime without manual restart.
+11. As a bot operator, I want rate-limit responses handled explicitly, so that the bot does not loop aggressively when Reddit throttles requests.
+12. As a maintainer, I want the existing `Post` deserializer and media handlers preserved where possible, so that this change stays focused on Reddit transport.
+13. As a maintainer, I want no public Redlib instance dependency, so that the bot does not depend on third-party uptime, trust, or instance policy.
+14. As a maintainer, I want a clean-room implementation, so that AGPL Redlib source is used only as behavioral reference and not copied into this MIT project.
+15. As a maintainer, I want deterministic tests around token/client behavior, endpoint construction, and error mapping, so that normal tests do not need live Reddit.
+16. As a deployer, I want configuration documented for this transport, so that runtime requirements and risks are clear before deployment.
+17. As a deployer, I want a manual smoke checklist covering image, video, link, self, gallery, direct post, and subreddit validation, so that parity can be verified after rollout.
 
 ## Implementation Decisions
 
-- Keep the existing public Reddit fetch interface for subreddit top posts and direct post lookup. Change the internal transport from Reddit JSON/API endpoints to old Reddit HTML.
-- Use a real HTML parser with CSS selectors instead of regex parsing. Parse listing nodes from old Reddit's site table and direct-post pages from the first post node.
-- Use browser-like request headers and a bounded timeout for old Reddit HTML requests.
-- Validate that successful responses are HTML and contain old Reddit listing/post markers before parsing.
-- Extract post id, subreddit, permalink, outbound URL, title, gallery flag, and domain from old Reddit node attributes and title text.
-- Skip promoted entries and malformed entries missing required id, title, permalink, or URL.
-- Classify scraped posts from URL, domain, and gallery flag. Image, video, self, and link posts should receive `post_hint` values that prevent blocked direct-link enrichment in normal feed handling.
-- Treat galleries as link posts in the first version unless complete gallery metadata is available. This avoids calling the current gallery path with missing media metadata.
-- Replace direct-post lookup with an old Reddit comments-page scrape for the requested id.
-- Make post enrichment failure non-fatal. If enrichment fails, log the failure and continue with listing data when available.
-- Replace subreddit metadata validation with an old Reddit HTML existence check, preserving user-facing subscription validation without relying on blocked JSON.
-- Keep downstream media handling, message formatting, repost buttons, seen-post recording, and filters intact unless a narrow change is required to avoid blocked API calls or panics.
-- Add observability around old Reddit fetches, parse counts, classification decisions, fallback-to-link decisions, and blocked/malformed page detection.
-- Keep OAuth, browser automation, full gallery extraction, self-text extraction, private/quarantined/age-gated subreddit support, and full Reddit JSON parity out of first scope.
+- Implement a single Reddit source: Redlib-style OAuth JSON. Do not add old Reddit HTML, new Reddit HTML, headless browser, RSS, public Redlib instance, or fallback chains.
+- Use `https://www.reddit.com/auth/v2/oauth/access-token/loid` to obtain an anonymous bearer token using Android-client-style headers and the Android client id observed in Redlib.
+- Use the bearer token against `https://oauth.reddit.com` JSON endpoints.
+- Preserve existing public Reddit API functions for top posts, direct post lookup, and subreddit metadata, changing only their internal transport/auth behavior.
+- Preserve existing `Post` JSON deserialization and downstream Telegram/media handling wherever possible.
+- Add `raw_json=1` to Reddit JSON requests so media URLs remain directly usable.
+- Store token state in memory, including bearer token, expiry, loid/session headers returned by Reddit, and rate-limit counters from response headers.
+- Refresh the token before expiry and force refresh on `401 Unauthorized`.
+- Map `403`, `404`, and Reddit JSON error reasons such as `private`, `banned`, `gated`, and `quarantined` into existing user-facing subreddit validation behavior where possible.
+- Treat `429` and low remaining rate-limit headers as backoff conditions, not parse failures.
+- Log auth creation, token refresh, endpoint status, rate-limit headers, and mapped Reddit errors without logging bearer tokens.
+- Do not copy Redlib source code verbatim because Redlib is AGPL-3.0-only. Reimplement the minimal behavior cleanly in this repository style.
+- Prefer the smallest dependency surface that works. If plain `reqwest` proves reliable, use it. If Reddit rejects plain `reqwest`, evaluate `wreq` or equivalent TLS/header emulation as a deliberate implementation decision.
+- Keep request volume aligned with current bot polling behavior. Do not add aggressive retries.
 
 ## Testing Decisions
 
-- Good tests should verify external behavior at stable seams: HTML input becomes expected internal post data, classification maps attributes to post types, and handler behavior does not panic when enrichment fails.
-- Parser and classifier tests should use deterministic fixture HTML or compact inline HTML. Normal tests must not call live Reddit, Telegram, or remote media hosts.
-- Listing parser tests should cover image posts, external link posts, promoted-post skipping, malformed/no-post pages, gallery fallback behavior, and requested limit truncation.
-- Direct-post parser tests should cover a valid comments page and a page with no usable post node.
-- Classifier tests should cover Reddit image hosts, image extensions, video hosts, gifv URLs, comments/self URLs, gallery flags, and unknown external links.
-- Handler-level tests should cover missing `post_hint` behavior at the highest feasible seam, proving failed direct enrichment logs and continues rather than panicking.
-- Existing tests for command parsing, message formatting, database behavior, and yt-dlp parsing should remain valid and unchanged unless behavior intentionally changes.
-- Verification after implementation should run formatter, linter, and unit tests, then do a manual smoke run for direct-post lookup and target-host old Reddit reachability.
+- Good tests verify behavior at stable seams: token response parsing, token refresh decision logic, endpoint construction, auth header injection, rate-limit parsing, and Reddit error mapping.
+- Normal tests must not depend on live Reddit, Telegram, or remote media hosts.
+- Use mocked HTTP responses or small local fixtures for OAuth token responses, listing responses, direct post responses, about responses, and error responses.
+- Existing tests for command parsing, database behavior, message formatting, Reddit post classification, and yt-dlp parsing should remain valid.
+- Add fixture coverage proving existing `Post` deserialization still supports image, hosted video, external link, self, and gallery JSON returned through OAuth.
+- Add tests that bearer tokens are never included in formatted logs/errors if logging helpers are introduced.
+- Manual smoke verification should run against live Reddit only after implementation: token acquisition, subreddit top feed, direct post lookup, subreddit about, image delivery, hosted video delivery, link delivery, self post delivery, gallery delivery, nonexistent sub, and private/gated sub.
 
 ## Out of Scope
 
-- OAuth or authenticated Reddit API integration.
-- Browser automation or headless browser scraping.
-- Full parity with Reddit JSON fields.
-- Reliable gallery media extraction in first version.
-- Reliable self-text extraction in first version.
-- Private, quarantined, NSFW-login-gated, or otherwise access-gated subreddit support.
-- Aggressive retrying, high-volume scraping, or bypassing Reddit access controls.
-- Reworking Telegram delivery UX beyond fallback-to-link behavior for unsupported posts.
+- HTML scraping from old Reddit or new Reddit.
+- Headless browser rendering.
+- RSS-based ingestion.
+- Depending on a public or self-hosted Redlib frontend as the bot's data source.
+- Official Reddit app-registration OAuth flow, unless this Redlib-style approach is rejected before implementation begins.
+- Logged-in user Reddit features, commenting, voting, mod actions, or private user data.
+- Reworking Telegram delivery UX beyond what is necessary to preserve current behavior.
+- Copying AGPL Redlib code into this repository.
 
 ## Further Notes
 
-Current evidence shows old Reddit HTML works for public top listing pages while JSON/API paths return blocked HTML. The first implementation should therefore restore simple feed delivery through old Reddit HTML and leave deeper media parity for later milestones.
+Live probe on June 12, 2026 confirmed Redlib-style OAuth works from this machine:
 
-Recommended milestone order:
+- token request returned HTTP `200`, bearer token, and roughly 24-hour expiry
+- OAuth listing endpoint returned current Reddit `Listing` JSON
+- direct post lookup returned usable post JSON
+- subreddit about returned metadata JSON
+- gallery posts included `gallery_data.items[].media_id` and matching `media_metadata`
+- hosted video posts included `post_hint = hosted:video`, `is_video = true`, and Reddit video metadata
+- external link and self-post fields matched current deserializer needs
+- nonexistent and private subreddit responses returned structured JSON errors
 
-1. Restore simple feed delivery with listing parsing, conservative classification, gallery-as-link fallback, and parser/classifier tests.
-2. Restore direct post lookup through old Reddit comments-page scraping and make enrichment non-panicking.
-3. Improve media parity for hosted video, gif handling, galleries, and crossposts.
-4. Add richer observability so future Reddit-side breakage is diagnosable from logs.
+The implementation should proceed as a transport/auth replacement, not a parser rewrite.

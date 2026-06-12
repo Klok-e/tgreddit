@@ -140,21 +140,13 @@ Issue title: ${title}
 
 Your job:
 1. Read the issue file and relevant repo docs.
-2. Implement exactly one vertical slice for that issue.
-3. Use TDD where practical:
-   - write behavior-focused tests through stable public seams
-   - implement the smallest change that passes
-   - repeat only for the listed acceptance criteria
-4. Run relevant repo validation. Discover commands from AGENTS.md, README, justfile, or CI.
-5. Do not commit.
-6. If blocked, ambiguous, or unsafe, stop and explain the blocker in your final message.
+2. Implement the issue using TDD.
+3. Do not commit.
+4. If blocked, ambiguous, or unsafe, stop and explain the blocker in your final message.
 
 Rules:
 - Do not implement out-of-scope features.
-- Do not perform broad refactors.
 - Do not change unrelated behavior.
-- Do not use external services unless the repo already requires them for local tests.
-- Prefer behavior/integration tests over implementation-detail tests.
 - Leave the worktree ready for an independent verifier.
 PROMPT
 )" > "$out"
@@ -182,9 +174,8 @@ Verifier failed cycle ${cycle} for local issue:
 
 ${issue}
 
-Continue this same implementation thread. Address the verifier feedback below, then leave the worktree ready for verification again.
+Address the verifier feedback below, then leave the worktree ready for verification again.
 
-Do not restart from scratch.
 Do not commit.
 Do not change out-of-scope behavior.
 
@@ -219,9 +210,9 @@ Issue title: ${title}
 Verify the current worktree against the issue and repo rules.
 
 Your job:
-1. Read the issue file, AGENTS.md, relevant docs, and current worktree.
+1. Read the issue file, relevant docs, and current worktree.
 2. Inspect the implementation for correctness, scope, and accidental unrelated changes.
-3. Run relevant validation commands yourself. At minimum consider AGENTS.md, README, justfile, and CI.
+3. Run relevant validation commands yourself.
 4. Do not intentionally edit files and do not commit.
 5. Return pass only if the issue acceptance criteria are met, relevant validation passes, and the change is scoped.
 
