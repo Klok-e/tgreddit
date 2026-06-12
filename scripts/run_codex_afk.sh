@@ -32,6 +32,12 @@ codex_afk_resume() {
     "$@"
 }
 
+show_codex_progress() {
+  local out="$1"
+
+  tee "$out" | jq --unbuffered .
+}
+
 issue_status() {
   local issue="$1"
 
@@ -234,7 +240,7 @@ Rules:
 - Do not change unrelated behavior.
 - Leave the worktree ready for an independent verifier.
 PROMPT
-)" | tee "$out"
+)" | show_codex_progress "$out"
 
   THREAD_ID="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out" | sed -n '1p')"
   if [[ -z "$THREAD_ID" || "$THREAD_ID" == "null" ]]; then
@@ -268,7 +274,7 @@ Verifier feedback:
 
 ${feedback}
 PROMPT
-)" | tee "$out"
+)" | show_codex_progress "$out"
 }
 
 run_verifier() {
@@ -305,7 +311,7 @@ Return JSON matching the schema:
 - feedback: exact fixes needed if fail, or concise rationale if pass
 - commands_run: validation commands you ran
 PROMPT
-)" | tee "$out"; then
+)" | show_codex_progress "$out"; then
     cat > "$last" <<'JSON'
 {
   "status": "fail",
@@ -354,7 +360,7 @@ Inspect the current diff yourself. Return JSON matching the schema:
 Do not edit files.
 Do not commit.
 PROMPT
-)" | tee "$out"
+)" | show_codex_progress "$out"
 
   COMMIT_SUBJECT="$(jq -r '.subject' "$last")"
   COMMIT_BODY="$(jq -r '.body' "$last")"
