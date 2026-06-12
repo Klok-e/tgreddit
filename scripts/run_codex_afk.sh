@@ -234,7 +234,7 @@ Rules:
 - Do not change unrelated behavior.
 - Leave the worktree ready for an independent verifier.
 PROMPT
-)" > "$out"
+)" | tee "$out"
 
   THREAD_ID="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out" | sed -n '1p')"
   if [[ -z "$THREAD_ID" || "$THREAD_ID" == "null" ]]; then
@@ -268,7 +268,7 @@ Verifier feedback:
 
 ${feedback}
 PROMPT
-)" > "$out"
+)" | tee "$out"
 }
 
 run_verifier() {
@@ -305,7 +305,7 @@ Return JSON matching the schema:
 - feedback: exact fixes needed if fail, or concise rationale if pass
 - commands_run: validation commands you ran
 PROMPT
-)" > "$out"; then
+)" | tee "$out"; then
     cat > "$last" <<'JSON'
 {
   "status": "fail",
@@ -354,7 +354,7 @@ Inspect the current diff yourself. Return JSON matching the schema:
 Do not edit files.
 Do not commit.
 PROMPT
-)" > "$out"
+)" | tee "$out"
 
   COMMIT_SUBJECT="$(jq -r '.subject' "$last")"
   COMMIT_BODY="$(jq -r '.body' "$last")"
