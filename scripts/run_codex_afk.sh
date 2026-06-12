@@ -15,17 +15,19 @@ require_cmd() {
 }
 
 codex_afk_exec() {
-  codex exec \
+  codex \
     --sandbox workspace-write \
     --ask-for-approval never \
+    exec \
     -c sandbox_workspace_write.network_access=true \
     "$@"
 }
 
 codex_afk_resume() {
-  codex exec resume \
+  codex \
     --sandbox workspace-write \
     --ask-for-approval never \
+    exec resume \
     -c sandbox_workspace_write.network_access=true \
     "$@"
 }
