@@ -14,11 +14,96 @@ require_cmd() {
   fi
 }
 
-first_ready_issue() {
+codex_afk_exec() {
+  codex exec \
+    --sandbox workspace-write \
+    --ask-for-approval never \
+    -c sandbox_workspace_write.network_access=true \
+    "$@"
+}
+
+codex_afk_resume() {
+  codex exec resume \
+    --sandbox workspace-write \
+    --ask-for-approval never \
+    -c sandbox_workspace_write.network_access=true \
+    "$@"
+}
+
+issue_status() {
+  local issue="$1"
+
+  awk '
+    /^Status:[[:space:]]*/ {
+      sub(/^Status:[[:space:]]*/, "")
+      sub(/[[:space:]]*$/, "")
+      print
+      exit
+    }
+  ' "$issue"
+}
+
+blocked_by_paths() {
+  local issue="$1"
+
+  awk '
+    /^##[[:space:]]+Blocked by[[:space:]]*$/ {
+      in_block = 1
+      next
+    }
+    in_block && /^##[[:space:]]+/ {
+      exit
+    }
+    in_block {
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^[[:space:]]*$/) {
+        next
+      }
+      if (line ~ /^[[:space:]]*None([[:space:]]|$|-)/) {
+        next
+      }
+      if (line ~ /^[[:space:]]*-[[:space:]]+/) {
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        if (line != "") {
+          print line
+        }
+      }
+    }
+  ' "$issue"
+}
+
+is_runnable_issue() {
+  local issue="$1"
+  local blocker
+  local blocker_status
+
+  if [[ "$(issue_status "$issue")" != "ready-for-agent" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r blocker; do
+    if [[ ! -f "$blocker" ]]; then
+      printf '%s skipped: missing blocker %s\n' "$issue" "$blocker" >> "$SKIP_REASONS"
+      return 1
+    fi
+
+    blocker_status="$(issue_status "$blocker")"
+    if [[ "$blocker_status" != "complete" ]]; then
+      printf '%s skipped: blocker %s is %s\n' "$issue" "$blocker" "${blocker_status:-missing-status}" >> "$SKIP_REASONS"
+      return 1
+    fi
+  done < <(blocked_by_paths "$issue")
+
+  return 0
+}
+
+first_runnable_issue() {
   find .scratch -path '*/issues/*.md' -type f 2>/dev/null \
     | sort \
     | while IFS= read -r issue; do
-        if grep -Eq '^Status:[[:space:]]*ready-for-agent[[:space:]]*$' "$issue"; then
+        if is_runnable_issue "$issue"; then
           printf '%s\n' "$issue"
           return 0
         fi
@@ -125,11 +210,9 @@ run_initial_implementer() {
   local out="$TMPDIR/implement-initial.jsonl"
   local last="$TMPDIR/implement-initial.txt"
 
-  codex exec \
+  codex_afk_exec \
     --json \
     --cd "$PWD" \
-    --sandbox workspace-write \
-    --ask-for-approval never \
     --output-last-message "$last" \
     "$(cat <<PROMPT
 You are an AFK coding agent working on local issue:
@@ -165,7 +248,7 @@ resume_implementer() {
   local out="$TMPDIR/implement-cycle-${cycle}.jsonl"
   local last="$TMPDIR/implement-cycle-${cycle}.txt"
 
-  codex exec resume \
+  codex_afk_resume \
     --json \
     --output-last-message "$last" \
     "$THREAD_ID" \
@@ -193,11 +276,9 @@ run_verifier() {
   local out="$TMPDIR/verify-cycle-${cycle}.jsonl"
   local last="$TMPDIR/verify-cycle-${cycle}.json"
 
-  if ! codex exec \
+  if ! codex_afk_exec \
     --json \
     --cd "$PWD" \
-    --sandbox workspace-write \
-    --ask-for-approval never \
     --output-schema "$VERIFY_SCHEMA" \
     --output-last-message "$last" \
     "$(cat <<PROMPT
@@ -250,11 +331,9 @@ generate_commit_message() {
   local out="$TMPDIR/commit-message.jsonl"
   local last="$TMPDIR/commit-message.json"
 
-  codex exec \
+  codex_afk_exec \
     --json \
     --cd "$PWD" \
-    --sandbox workspace-write \
-    --ask-for-approval never \
     --output-schema "$COMMIT_SCHEMA" \
     --output-last-message "$last" \
     "$(cat <<PROMPT
@@ -306,14 +385,20 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-ISSUE_PATH="$(first_ready_issue || true)"
-if [[ -z "$ISSUE_PATH" ]]; then
-  echo "No ready-for-agent issues found under .scratch/*/issues/*.md" >&2
-  exit 1
-fi
-
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+
+SKIP_REASONS="$TMPDIR/skipped-issues.txt"
+
+ISSUE_PATH="$(first_runnable_issue || true)"
+if [[ -z "$ISSUE_PATH" ]]; then
+  echo "No runnable ready-for-agent issues found under .scratch/*/issues/*.md" >&2
+  if [[ -s "$SKIP_REASONS" ]]; then
+    echo >&2
+    cat "$SKIP_REASONS" >&2
+  fi
+  exit 1
+fi
 
 THREAD_ID=""
 VERIFY_STATUS=""

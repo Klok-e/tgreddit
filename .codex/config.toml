@@ -1,0 +1,6 @@
+[sandbox_workspace_write]
+network_access = true
+
+[features.network_proxy]
+enabled = true
+domains = { "oauth.reddit.com" = "allow", "www.reddit.com" = "allow", "old.reddit.com" = "allow" }
