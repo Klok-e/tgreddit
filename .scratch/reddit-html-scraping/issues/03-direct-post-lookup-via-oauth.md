@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Direct Post Lookup Via OAuth
 
@@ -21,3 +21,9 @@ Switch direct Reddit post lookup to authenticated Reddit JSON through the OAuth 
 ## Blocked by
 
 - .scratch/reddit-html-scraping/issues/01-oauth-transport.md
+
+## Comments
+
+### AFK completed
+
+Direct post lookup now uses the OAuth JSON transport with raw_json=1; deterministic local tests cover image, hosted video, external link, self, gallery, request construction, and missing-post behavior. Validation passed.

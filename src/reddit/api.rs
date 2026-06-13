@@ -64,18 +64,17 @@ pub async fn get_subreddit_top_posts(
 }
 
 pub async fn get_link(link_id: &str) -> Result<Post> {
-    info!("getting link id {link_id}");
-    let url = get_base_url().join("/api/info.json")?;
-    let client = create_client().build()?;
-    let res = client
-        .get(url)
-        .query(&[("id", &format!("t3_{link_id}"))])
-        .send()
-        .await?
-        .json::<ListingResponse>()
-        .await?;
+    get_link_via(get_transport()?, link_id).await
+}
 
-    res.data
+pub(crate) async fn get_link_via(transport: &RedditOAuthTransport, link_id: &str) -> Result<Post> {
+    info!("getting link id {link_id}");
+    let path = "/api/info.json";
+    let query = [("id", format!("t3_{link_id}"))];
+    let listing = transport.get_json::<ListingResponse>(path, &query).await?;
+
+    listing
+        .data
         .children
         .into_iter()
         .map(|e| e.data)
@@ -303,5 +302,173 @@ mod tests {
         assert_eq!(post.title, "An image");
         assert_eq!(post.permalink, "/r/pics/comments/img1/an_image/");
         assert_eq!(post.url, "https://i.redd.it/example.jpg");
+    }
+
+    fn empty_listing() -> String {
+        r#"{"data": {"children": []}}"#.to_owned()
+    }
+
+    fn start_info_json_server(
+        listing_json: &str,
+    ) -> (crate::reddit::test_server::TestServer, RedditOAuthTransport) {
+        use crate::reddit::test_server::{TestResponse, TestServer, TestServerConfig};
+        use std::collections::HashMap;
+
+        let mut responses_by_path = HashMap::new();
+        responses_by_path.insert(
+            "/api/info.json".to_owned(),
+            TestResponse::json(listing_json),
+        );
+        let server = TestServer::start(TestServerConfig {
+            token_response: Some(TestResponse::json_with_session(
+                r#"{"access_token":"secret-token","expires_in":86400}"#,
+                "loid-123",
+                "session-456",
+            )),
+            responses_by_path,
+            default_response: None,
+            stop_after: 1,
+        });
+        let transport =
+            RedditOAuthTransport::with_base_urls(&server.base_url(), &server.base_url()).unwrap();
+        (server, transport)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn get_link_uses_oauth_info_json_with_bearer_and_raw_json() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (server, transport) = start_info_json_server(&listing(&[image_post()]));
+            let post = get_link_via(&transport, "img1").await.unwrap();
+            assert_eq!(post.id, "img1");
+
+            let requests = server.join();
+            assert_eq!(requests.len(), 2);
+
+            let token_request = &requests[0];
+            assert_eq!(token_request.method, "POST");
+            assert_eq!(token_request.path, "/auth/v2/oauth/access-token/loid");
+
+            let api_request = &requests[1];
+            assert_eq!(api_request.method, "GET");
+            assert_eq!(api_request.path, "/api/info.json");
+            assert!(
+                api_request.query.contains("id=t3_img1"),
+                "expected id=t3_img1 in query, got {}",
+                api_request.query
+            );
+            assert!(
+                api_request.query.contains("raw_json=1"),
+                "expected raw_json=1 in query, got {}",
+                api_request.query
+            );
+            assert_eq!(api_request.headers["authorization"], "Bearer secret-token");
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_returns_image_post() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&listing(&[image_post()]));
+            let post = get_link_via(&transport, "img1").await.unwrap();
+            assert_eq!(post.id, "img1");
+            assert_eq!(post.post_type, PostType::Image);
+            assert_eq!(post.post_hint.as_deref(), Some("image"));
+            assert_eq!(post.subreddit, "pics");
+            assert_eq!(post.title, "An image");
+            assert_eq!(post.url, "https://i.redd.it/example.jpg");
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_returns_hosted_video_post() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&listing(&[hosted_video_post()]));
+            let post = get_link_via(&transport, "vid1").await.unwrap();
+            assert_eq!(post.id, "vid1");
+            assert_eq!(post.post_type, PostType::Video);
+            assert_eq!(post.post_hint.as_deref(), Some("hosted:video"));
+            assert!(post.url.contains("DASH_720.mp4"));
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_returns_external_link_post() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&listing(&[external_link_post()]));
+            let post = get_link_via(&transport, "lnk1").await.unwrap();
+            assert_eq!(post.id, "lnk1");
+            assert_eq!(post.post_type, PostType::Link);
+            assert_eq!(post.post_hint.as_deref(), Some("link"));
+            assert_eq!(post.url, "https://example.com/article");
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_returns_self_text_post() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&listing(&[self_text_post()]));
+            let post = get_link_via(&transport, "sft1").await.unwrap();
+            assert_eq!(post.id, "sft1");
+            assert_eq!(post.post_type, PostType::SelfText);
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_returns_gallery_post_with_metadata() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&listing(&[gallery_post()]));
+            let post = get_link_via(&transport, "gal1").await.unwrap();
+            assert_eq!(post.id, "gal1");
+            assert_eq!(post.post_type, PostType::Gallery);
+
+            let gallery_data = post
+                .gallery_data
+                .as_ref()
+                .expect("gallery_data must be present for gallery post");
+            assert_eq!(gallery_data.items.len(), 2);
+            assert_eq!(gallery_data.items[0].media_id, "img1");
+            assert_eq!(gallery_data.items[1].media_id, "img2");
+
+            let media_metadata = post
+                .media_metadata
+                .as_ref()
+                .expect("media_metadata must be present for gallery post");
+            assert_eq!(media_metadata.len(), 2);
+            assert_eq!(
+                media_metadata["img1"].s.as_ref().unwrap().url,
+                "https://i.redd.it/img1.jpg"
+            );
+            assert_eq!(
+                media_metadata["img2"].s.as_ref().unwrap().url,
+                "https://i.redd.it/img2.jpg"
+            );
+        });
+    }
+
+    #[test]
+    fn get_link_via_oauth_errors_when_no_post_in_response() {
+        let rt = runtime();
+        rt.block_on(async {
+            let (_server, transport) = start_info_json_server(&empty_listing());
+            let err = get_link_via(&transport, "missing").await.unwrap_err();
+            assert!(
+                format!("{err}").contains("no post in response"),
+                "expected missing-post error, got {err:?}"
+            );
+        });
     }
 }
