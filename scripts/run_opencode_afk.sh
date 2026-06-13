@@ -60,15 +60,30 @@ show_opencode_progress() {
   local last_tool_summary=""
   local text
   local clean_line
+  local display_line
+  local json_line
   local summary
 
   while IFS= read -r line; do
     printf '%s\n' "$line" >> "$out"
     clean_line="${line//$'\r'/}"
+    display_line="$clean_line"
+    json_line="$clean_line"
 
-    if ! jq -e . >/dev/null 2>&1 <<< "$clean_line"; then
-      if [[ "$clean_line" != \{* && "$clean_line" != \[* ]]; then
-        printf '%s\n' "$clean_line"
+    if ! jq -e . >/dev/null 2>&1 <<< "$json_line"; then
+      if [[ "$clean_line" == *\{* ]]; then
+        json_line="{${clean_line#*\{}"
+      elif [[ "$clean_line" == *\[* ]]; then
+        json_line="[${clean_line#*\[}"
+      fi
+    fi
+
+    if ! jq -e . >/dev/null 2>&1 <<< "$json_line"; then
+      if [[ "$clean_line" != *\{* && "$clean_line" != *\[* ]]; then
+        display_line="$(strip_terminal_controls "$display_line")"
+        if [[ "$display_line" =~ [^[:space:]] ]]; then
+          print_progress_line "$display_line"
+        fi
       fi
       last_tool_summary=""
       continue
@@ -79,7 +94,7 @@ show_opencode_progress() {
         continue
       fi
 
-      printf '%s\n' "$text"
+      print_progress_line "$text"
     done < <(jq -r '
       [
         .part?,
@@ -89,15 +104,21 @@ show_opencode_progress() {
       | select(type == "object")
       | select(.type == "text" or .type == "reasoning")
       | .text?
-      | select(type == "string" and length > 0)
-    ' <<< "$clean_line")
+      | select(type == "string")
+      | gsub("\r"; "")
+      | gsub("\u001b\\[[0-9;?]*[ -/]*[@-~]"; "")
+      | split("<system-reminder>")[0]
+      | split("\n")[]
+      | sub("^[[:space:]]+"; "")
+      | select(test("\\S"))
+    ' <<< "$json_line")
 
     while IFS= read -r summary; do
       if [[ -z "$summary" || "$summary" == "$last_tool_summary" ]]; then
         continue
       fi
 
-      printf '%s\n' "$summary"
+      print_progress_line "$summary"
       last_tool_summary="$summary"
     done < <(jq -r '
       [
@@ -120,7 +141,10 @@ show_opencode_progress() {
           ""
         )
         | gsub("\r"; "")
+        | gsub("\u001b\\[[0-9;?]*[ -/]*[@-~]"; "")
+        | split("<system-reminder>")[0]
         | split("\n")[0]
+        | sub("^[[:space:]]+"; "")
         | .[0:140] as $title
       | (
           if $status == "completed" then "Finished tool"
@@ -131,8 +155,16 @@ show_opencode_progress() {
         ) as $prefix
       | $prefix + ": " + $tool +
         (if ($title | type == "string" and length > 0) then " - " + $title else "" end)
-    ' <<< "$clean_line")
+    ' <<< "$json_line")
   done
+}
+
+strip_terminal_controls() {
+  printf '%s' "$1" | sed -E $'s/\x1B\[[0-9;?]*[ -\/]*[@-~]//g'
+}
+
+print_progress_line() {
+  printf '\r\033[K%s\n' "$1"
 }
 
 json_lines() {
@@ -308,10 +340,21 @@ load_state() {
     return 0
   fi
 
-  IMPLEMENTER_SESSION_ID="$(jq -r '.implementer_session_id // ""' "$state")"
+  IMPLEMENTER_SESSION_ID="$(normalize_session_id "$(jq -r '.implementer_session_id // ""' "$state")")"
   SESSION_PHASE="$(jq -r '.session_phase // ""' "$state")"
-  SESSION_ID="$(jq -r '.session_id // ""' "$state")"
+  SESSION_ID="$(normalize_session_id "$(jq -r '.session_id // ""' "$state")")"
   SAVED_FEEDBACK="$(jq -r '.feedback // ""' "$state")"
+}
+
+normalize_session_id() {
+  case "$1" in
+    ""|null|'""')
+      printf ''
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 save_state() {
@@ -373,7 +416,7 @@ recover_implementer_session_id() {
     return 1
   fi
 
-  recovered="$(jq -Rc --arg dir "$PWD" --arg title "$IMPLEMENTER_TITLE" '
+  recovered="$(jq -Rrc --arg dir "$PWD" --arg title "$IMPLEMENTER_TITLE" '
     fromjson? |
     select(type == "array") |
     [
@@ -384,8 +427,9 @@ recover_implementer_session_id() {
     last |
     .id // ""
   ' "$sessions" | sed -n '1p')"
+  recovered="$(normalize_session_id "$recovered")"
 
-  if [[ -n "$recovered" && "$recovered" != "null" ]]; then
+  if [[ -n "$recovered" ]]; then
     IMPLEMENTER_SESSION_ID="$recovered"
     echo "Recovered implementer session: $IMPLEMENTER_SESSION_ID"
   fi
@@ -414,7 +458,8 @@ capture_session_id() {
     .[]? |
     select(type == "string" and length > 0)
   ' | sed -n '1p')"
-  if [[ -n "$captured" && "$captured" != "null" ]]; then
+  captured="$(normalize_session_id "$captured")"
+  if [[ -n "$captured" ]]; then
     printf -v "$target" '%s' "$captured"
   fi
 }
