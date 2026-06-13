@@ -54,6 +54,37 @@ show_opencode_progress() {
   tee "$out" | jq --unbuffered .
 }
 
+run_preflight() {
+  echo "Running AFK sandbox preflight"
+
+  sbx run "$SBX_PROFILE" -- --version >/dev/null
+  sbx exec -d "$SBX_PROFILE" bash -lc '
+    set -euo pipefail
+
+    cd /home/dima/Desktop/tgreddit
+
+    need() {
+      if ! command -v "$1" >/dev/null; then
+        echo "$1 is required in the AFK sandbox." >&2
+        exit 1
+      fi
+    }
+
+    need git
+    need jq
+    need cargo
+    cargo --version >/dev/null
+    cargo fmt --version >/dev/null
+    cargo clippy --version >/dev/null
+    need yt-dlp
+    yt-dlp --version >/dev/null
+    need ffmpeg
+    ffmpeg -version >/dev/null
+    test -f tgreddit.toml
+    test -f telegram-e2e.toml
+  '
+}
+
 issue_status() {
   local issue="$1"
 
@@ -542,6 +573,8 @@ VERIFY_SUMMARY=""
 VERIFY_FEEDBACK=""
 VERIFY_COMMANDS=""
 VERIFY_COMMIT=""
+
+run_preflight
 
 EXISTING_STATE="$(active_state_file)"
 if [[ -n "$EXISTING_STATE" ]]; then
