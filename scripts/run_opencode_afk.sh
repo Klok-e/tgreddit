@@ -21,13 +21,20 @@ require_cmd() {
 opencode_afk_run() {
   local agent="$1"
   local model="$2"
-  shift 2
+  local title="$3"
+  shift 3
+
+  local title_args=()
+  if [[ -n "$title" ]]; then
+    title_args=(--title "$title")
+  fi
 
   sbx run "$SBX_PROFILE" -- run \
     --format json \
     --dir "$PWD" \
     --agent "$agent" \
     --model "$model" \
+    "${title_args[@]}" \
     --dangerously-skip-permissions \
     "$@"
 }
@@ -51,7 +58,18 @@ opencode_afk_resume() {
 show_opencode_progress() {
   local out="$1"
 
-  tee "$out" | jq --unbuffered .
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$out"
+    if ! jq -e . >/dev/null 2>&1 <<< "$line"; then
+      printf '%s\n' "$line"
+    fi
+  done
+}
+
+json_lines() {
+  local out="$1"
+
+  jq -Rc 'fromjson?' "$out"
 }
 
 run_preflight() {
@@ -158,11 +176,11 @@ first_runnable_issue() {
   find .scratch -path '*/issues/*.md' -type f 2>/dev/null \
     | sort \
     | while IFS= read -r issue; do
-        if is_runnable_issue "$issue"; then
-          printf '%s\n' "$issue"
-          return 0
-        fi
-      done
+      if is_runnable_issue "$issue"; then
+        printf '%s\n' "$issue"
+        return 0
+      fi
+    done
 }
 
 issue_title() {
@@ -204,6 +222,7 @@ load_state() {
 
   ISSUE_PATH="$(jq -r '.issue_path' "$state")"
   ISSUE_TITLE="$(jq -r '.issue_title' "$state")"
+  IMPLEMENTER_TITLE="$(implementer_title "$ISSUE_PATH")"
   STATE_PHASE="$(jq -r '.phase' "$state")"
   CYCLE="$(jq -r '.cycle' "$state")"
   SESSION_ID="$(jq -r '.session_id // ""' "$state")"
@@ -243,11 +262,47 @@ clear_state() {
   fi
 }
 
+implementer_title() {
+  local issue="$1"
+
+  printf 'AFK implementer: %s\n' "$issue"
+}
+
+recover_implementer_session_id() {
+  local sessions="$TMPDIR/opencode-sessions.jsonl"
+  local recovered
+
+  if [[ -n "$SESSION_ID" || -z "${IMPLEMENTER_TITLE:-}" ]]; then
+    return 0
+  fi
+
+  if ! sbx exec -d "$SBX_PROFILE" bash -lc 'cd /home/dima/Desktop/tgreddit && opencode session list --format json --max-count 50 | jq -c .' > "$sessions"; then
+    return 1
+  fi
+
+  recovered="$(jq -Rc --arg dir "$PWD" --arg title "$IMPLEMENTER_TITLE" '
+    fromjson? |
+    select(type == "array") |
+    [
+      .[] |
+      select(.directory == $dir and .title == $title)
+    ] |
+    sort_by(.updated) |
+    last |
+    .id // ""
+  ' "$sessions" | sed -n '1p')"
+
+  if [[ -n "$recovered" && "$recovered" != "null" ]]; then
+    SESSION_ID="$recovered"
+    echo "Recovered implementer session: $SESSION_ID"
+  fi
+}
+
 capture_session_id() {
   local out="$1"
   local captured
 
-  captured="$(jq -r '
+  captured="$(json_lines "$out" | jq -r '
     select(type == "object") |
     [
       .sessionID?,
@@ -260,7 +315,7 @@ capture_session_id() {
     ] |
     .[]? |
     select(type == "string" and length > 0)
-  ' "$out" | sed -n '1p')"
+  ' | sed -n '1p')"
   if [[ -n "$captured" && "$captured" != "null" ]]; then
     SESSION_ID="$captured"
   fi
@@ -271,14 +326,14 @@ extract_verifier_result() {
   local last="$2"
   local result
 
-  result="$(jq -rs '
+  result="$(json_lines "$out" | jq -rs '
     [
       .. |
       strings |
       select(contains("\"status\"") and contains("\"commands_run\""))
     ] |
     last // ""
-  ' "$out")"
+  ')"
 
   if [[ -z "$result" || "$result" == '""' ]]; then
     return 1
@@ -351,6 +406,7 @@ run_initial_implementer() {
   if ! opencode_afk_run \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
+    "$IMPLEMENTER_TITLE" \
     "$(cat <<PROMPT
 You are an AFK coding agent working on local issue:
 
@@ -371,11 +427,17 @@ Rules:
 PROMPT
 )" | show_opencode_progress "$out"; then
     capture_session_id "$out"
+    if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+      recover_implementer_session_id || true
+    fi
     save_state "initial_implement" 1 ""
     return 1
   fi
 
   capture_session_id "$out"
+  if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+    recover_implementer_session_id || true
+  fi
   if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
     echo "Could not capture implementer session id." >&2
     exit 1
@@ -451,6 +513,7 @@ run_code_quality() {
   if ! opencode_afk_run \
     afk-code-quality \
     "$QUALITY_MODEL" \
+    "" \
     "$(cat <<PROMPT
 You are reviewing and improving the current AFK implementation for local issue:
 
@@ -486,6 +549,7 @@ run_verifier() {
   if ! opencode_afk_run \
     afk-verifier \
     "$VERIFIER_MODEL" \
+    "" \
     "$(cat <<PROMPT
 You are an independent verifier for local issue:
 
@@ -554,6 +618,13 @@ TMPDIR="$(mktemp -d)"
 cleanup() {
   local status=$?
 
+  if ((status != 0)) && [[ -n "${STATE_PATH:-}" && -f "${STATE_PATH:-}" && -z "${SESSION_ID:-}" ]]; then
+    recover_implementer_session_id || true
+    if [[ -n "${SESSION_ID:-}" ]]; then
+      save_state "$STATE_PHASE" "$CYCLE" "$SAVED_FEEDBACK"
+    fi
+  fi
+
   rm -rf "$TMPDIR"
   if ((status != 0)) && [[ -n "${STATE_PATH:-}" && -f "${STATE_PATH:-}" ]]; then
     echo "AFK state saved: $STATE_PATH" >&2
@@ -568,6 +639,7 @@ STATE_PHASE=""
 CYCLE=1
 SAVED_FEEDBACK=""
 SESSION_ID=""
+IMPLEMENTER_TITLE=""
 VERIFY_STATUS=""
 VERIFY_SUMMARY=""
 VERIFY_FEEDBACK=""
@@ -593,6 +665,7 @@ else
   fi
 
   ISSUE_TITLE="$(issue_title "$ISSUE_PATH")"
+  IMPLEMENTER_TITLE="$(implementer_title "$ISSUE_PATH")"
   STATE_PATH="$(state_path_for_issue "$ISSUE_PATH")"
   STATE_PHASE="initial_implement"
   echo "Selected issue: $ISSUE_PATH"
@@ -601,6 +674,9 @@ fi
 while true; do
   case "$STATE_PHASE" in
     initial_implement)
+      if [[ -z "$SESSION_ID" ]]; then
+        recover_implementer_session_id || true
+      fi
       if [[ -n "$SESSION_ID" ]]; then
         echo "Resuming interrupted implementer"
         continue_implementer "$ISSUE_PATH" "$CYCLE" "$CYCLE"
