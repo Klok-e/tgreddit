@@ -2,9 +2,13 @@
 set -euo pipefail
 
 MAX_CYCLES=5
+IMPLEMENTER_MODEL="opencode-go/minimax-m3"
+QUALITY_MODEL="opencode-go/minimax-m3"
+VERIFIER_MODEL="openai/gpt-5.5"
+SBX_PROFILE="${SBX_PROFILE:-opencode-tgreddit}"
 
 usage() {
-  echo "Usage: scripts/run_codex_afk.sh" >&2
+  echo "Usage: scripts/run_opencode_afk.sh" >&2
 }
 
 require_cmd() {
@@ -14,25 +18,37 @@ require_cmd() {
   fi
 }
 
-codex_afk_exec() {
-  codex \
-    --sandbox workspace-write \
-    --ask-for-approval never \
-    exec \
-    -c sandbox_workspace_write.network_access=true \
+opencode_afk_run() {
+  local agent="$1"
+  local model="$2"
+  shift 2
+
+  sbx run "$SBX_PROFILE" -- run \
+    --format json \
+    --dir "$PWD" \
+    --agent "$agent" \
+    --model "$model" \
+    --dangerously-skip-permissions \
     "$@"
 }
 
-codex_afk_resume() {
-  codex \
-    --sandbox workspace-write \
-    --ask-for-approval never \
-    exec resume \
-    -c sandbox_workspace_write.network_access=true \
+opencode_afk_resume() {
+  local agent="$1"
+  local model="$2"
+  local session_id="$3"
+  shift 3
+
+  sbx run "$SBX_PROFILE" -- run \
+    --format json \
+    --dir "$PWD" \
+    --session "$session_id" \
+    --agent "$agent" \
+    --model "$model" \
+    --dangerously-skip-permissions \
     "$@"
 }
 
-show_codex_progress() {
+show_opencode_progress() {
   local out="$1"
 
   tee "$out" | jq --unbuffered .
@@ -159,7 +175,7 @@ load_state() {
   ISSUE_TITLE="$(jq -r '.issue_title' "$state")"
   STATE_PHASE="$(jq -r '.phase' "$state")"
   CYCLE="$(jq -r '.cycle' "$state")"
-  THREAD_ID="$(jq -r '.thread_id // ""' "$state")"
+  SESSION_ID="$(jq -r '.session_id // ""' "$state")"
   SAVED_FEEDBACK="$(jq -r '.feedback // ""' "$state")"
   STATE_PATH="$state"
 }
@@ -174,16 +190,17 @@ save_state() {
     --arg issue_path "$ISSUE_PATH" \
     --arg issue_title "$ISSUE_TITLE" \
     --arg phase "$phase" \
-    --arg thread_id "$THREAD_ID" \
+    --arg session_id "$SESSION_ID" \
     --arg feedback "$feedback" \
     --argjson cycle "$cycle" \
     '{
-      version: 1,
+      version: 2,
+      harness: "opencode",
       issue_path: $issue_path,
       issue_title: $issue_title,
       phase: $phase,
       cycle: $cycle,
-      thread_id: $thread_id,
+      session_id: $session_id,
       feedback: $feedback
     }' > "$tmp_file"
   mv "$tmp_file" "$STATE_PATH"
@@ -195,14 +212,55 @@ clear_state() {
   fi
 }
 
-capture_thread_id() {
+capture_session_id() {
   local out="$1"
   local captured
 
-  captured="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out" | sed -n '1p')"
+  captured="$(jq -r '
+    select(type == "object") |
+    [
+      .sessionID?,
+      .session_id?,
+      .sessionId?,
+      .session?.id?,
+      .properties?.sessionID?,
+      .properties?.session_id?,
+      .properties?.sessionId?
+    ] |
+    .[]? |
+    select(type == "string" and length > 0)
+  ' "$out" | sed -n '1p')"
   if [[ -n "$captured" && "$captured" != "null" ]]; then
-    THREAD_ID="$captured"
+    SESSION_ID="$captured"
   fi
+}
+
+extract_verifier_result() {
+  local out="$1"
+  local last="$2"
+  local result
+
+  result="$(jq -rs '
+    [
+      .. |
+      strings |
+      select(contains("\"status\"") and contains("\"commands_run\""))
+    ] |
+    last // ""
+  ' "$out")"
+
+  if [[ -z "$result" || "$result" == '""' ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "$result" | jq -r . > "$last"
+  jq -e '
+    type == "object" and
+    (.status == "pass" or .status == "fail") and
+    (.summary | type == "string") and
+    (.feedback | type == "string") and
+    (.commands_run | type == "array")
+  ' "$last" >/dev/null
 }
 
 set_issue_status() {
@@ -253,51 +311,15 @@ append_issue_comment() {
   } >> "$issue"
 }
 
-write_schemas() {
-  VERIFY_SCHEMA="$TMPDIR/verifier.schema.json"
-  COMMIT_SCHEMA="$TMPDIR/commit-message.schema.json"
-
-  cat > "$VERIFY_SCHEMA" <<'JSON'
-{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["status", "summary", "feedback", "commands_run"],
-  "properties": {
-    "status": { "type": "string", "enum": ["pass", "fail"] },
-    "summary": { "type": "string" },
-    "feedback": { "type": "string" },
-    "commands_run": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
-  }
-}
-JSON
-
-  cat > "$COMMIT_SCHEMA" <<'JSON'
-{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["subject", "body"],
-  "properties": {
-    "subject": { "type": "string" },
-    "body": { "type": "string" }
-  }
-}
-JSON
-}
-
 run_initial_implementer() {
   local issue="$1"
   local title="$2"
   local out="$TMPDIR/implement-initial.jsonl"
-  local last="$TMPDIR/implement-initial.txt"
 
   save_state "initial_implement" 1 ""
-  if ! codex_afk_exec \
-    --json \
-    --cd "$PWD" \
-    --output-last-message "$last" \
+  if ! opencode_afk_run \
+    afk-implementer \
+    "$IMPLEMENTER_MODEL" \
     "$(cat <<PROMPT
 You are an AFK coding agent working on local issue:
 
@@ -314,20 +336,20 @@ Your job:
 Rules:
 - Do not implement out-of-scope features.
 - Do not change unrelated behavior.
-- Leave the worktree ready for an independent verifier.
+- Leave the worktree ready for code-quality review.
 PROMPT
-)" | show_codex_progress "$out"; then
-    capture_thread_id "$out"
+)" | show_opencode_progress "$out"; then
+    capture_session_id "$out"
     save_state "initial_implement" 1 ""
     return 1
   fi
 
-  capture_thread_id "$out"
-  if [[ -z "$THREAD_ID" || "$THREAD_ID" == "null" ]]; then
-    echo "Could not capture implementer thread id." >&2
+  capture_session_id "$out"
+  if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+    echo "Could not capture implementer session id." >&2
     exit 1
   fi
-  save_state "verify" 1 ""
+  save_state "code_quality" 1 ""
 }
 
 continue_implementer() {
@@ -335,25 +357,24 @@ continue_implementer() {
   local cycle="$2"
   local next_cycle="$3"
   local out="$TMPDIR/implement-continue-${cycle}.jsonl"
-  local last="$TMPDIR/implement-continue-${cycle}.txt"
 
-  if ! codex_afk_resume \
-    --json \
-    --output-last-message "$last" \
-    "$THREAD_ID" \
+  if ! opencode_afk_resume \
+    afk-implementer \
+    "$IMPLEMENTER_MODEL" \
+    "$SESSION_ID" \
     "$(cat <<PROMPT
 Continue the AFK implementation for local issue:
 
 ${issue}
 
-Continue from the current repository state. Do not commit. Leave the worktree ready for verification.
+Continue from the current repository state. Do not commit. Leave the worktree ready for code-quality review.
 PROMPT
-)" | show_codex_progress "$out"; then
+)" | show_opencode_progress "$out"; then
     save_state "$STATE_PHASE" "$cycle" "$SAVED_FEEDBACK"
     return 1
   fi
 
-  save_state "verify" "$next_cycle" ""
+  save_state "code_quality" "$next_cycle" ""
 }
 
 resume_implementer() {
@@ -361,19 +382,18 @@ resume_implementer() {
   local cycle="$2"
   local feedback="$3"
   local out="$TMPDIR/implement-cycle-${cycle}.jsonl"
-  local last="$TMPDIR/implement-cycle-${cycle}.txt"
 
   save_state "resume_implement" "$cycle" "$feedback"
-  if ! codex_afk_resume \
-    --json \
-    --output-last-message "$last" \
-    "$THREAD_ID" \
+  if ! opencode_afk_resume \
+    afk-implementer \
+    "$IMPLEMENTER_MODEL" \
+    "$SESSION_ID" \
     "$(cat <<PROMPT
 Verifier failed cycle ${cycle} for local issue:
 
 ${issue}
 
-Address the verifier feedback below, then leave the worktree ready for verification again.
+Address the verifier feedback below, then leave the worktree ready for code-quality review again.
 
 Do not commit.
 Do not change out-of-scope behavior.
@@ -382,12 +402,46 @@ Verifier feedback:
 
 ${feedback}
 PROMPT
-)" | show_codex_progress "$out"; then
+)" | show_opencode_progress "$out"; then
     save_state "resume_implement" "$cycle" "$feedback"
     return 1
   fi
 
-  save_state "verify" "$((cycle + 1))" ""
+  save_state "code_quality" "$((cycle + 1))" ""
+}
+
+run_code_quality() {
+  local issue="$1"
+  local title="$2"
+  local cycle="$3"
+  local out="$TMPDIR/code-quality-cycle-${cycle}.jsonl"
+
+  save_state "code_quality" "$cycle" ""
+  if ! opencode_afk_run \
+    afk-code-quality \
+    "$QUALITY_MODEL" \
+    "$(cat <<PROMPT
+You are reviewing and improving the current AFK implementation for local issue:
+
+${issue}
+
+Issue title: ${title}
+
+Your job:
+1. Read the issue file, relevant docs, and current diff.
+2. Improve code quality without expanding scope.
+3. Pay special attention to cheap-model artifacts: overengineering, duplicated logic, bad names, brittle tests, missed edge cases, poor Rust idioms, and accidental unrelated changes.
+4. Run relevant validation commands when feasible.
+5. Do not commit.
+
+Leave the worktree ready for final verification.
+PROMPT
+)" | show_opencode_progress "$out"; then
+    save_state "code_quality" "$cycle" ""
+    return 1
+  fi
+
+  save_state "verify" "$cycle" ""
 }
 
 run_verifier() {
@@ -398,11 +452,9 @@ run_verifier() {
   local last="$TMPDIR/verify-cycle-${cycle}.json"
 
   save_state "verify" "$cycle" ""
-  if ! codex_afk_exec \
-    --json \
-    --cd "$PWD" \
-    --output-schema "$VERIFY_SCHEMA" \
-    --output-last-message "$last" \
+  if ! opencode_afk_run \
+    afk-verifier \
+    "$VERIFIER_MODEL" \
     "$(cat <<PROMPT
 You are an independent verifier for local issue:
 
@@ -416,16 +468,32 @@ Your job:
 1. Read the issue file, relevant docs, and current worktree.
 2. Inspect the implementation for correctness, scope, and accidental unrelated changes.
 3. Run relevant validation commands yourself.
-4. Do not intentionally edit files and do not commit.
-5. Return pass only if the issue acceptance criteria are met, relevant validation passes, and the change is scoped.
+4. Return pass only if the issue acceptance criteria are met, relevant validation passes, and the change is scoped.
 
-Return JSON matching the schema:
-- status: "pass" or "fail"
-- summary: concise outcome
-- feedback: exact fixes needed if fail, or concise rationale if pass
-- commands_run: validation commands you ran
+If verification passes:
+1. Update the issue Status line to complete.
+2. Append an "AFK completed" comment to the issue with a concise summary.
+3. Inspect the final diff and stage only intended changes.
+4. Run git commit yourself with a concise imperative subject and optional body.
+5. Return valid JSON with status "pass" and the commit hash.
+
+If verification fails:
+1. Do not commit.
+2. Return valid JSON with status "fail" and exact feedback for the implementer.
+
+Final response requirements:
+- JSON object only.
+- No markdown.
+- No code fences.
+- Include keys: status, summary, feedback, commands_run, commit.
 PROMPT
-)" | show_codex_progress "$out"; then
+)" | show_opencode_progress "$out"; then
+    save_state "verify" "$cycle" ""
+    return 1
+  fi
+
+  if ! extract_verifier_result "$out" "$last"; then
+    echo "Could not extract verifier JSON result." >&2
     save_state "verify" "$cycle" ""
     return 1
   fi
@@ -434,60 +502,11 @@ PROMPT
   VERIFY_SUMMARY="$(jq -r '.summary' "$last")"
   VERIFY_FEEDBACK="$(jq -r '.feedback' "$last")"
   VERIFY_COMMANDS="$(jq -r '.commands_run | join(", ")' "$last")"
+  VERIFY_COMMIT="$(jq -r '.commit // ""' "$last")"
 
   if [[ "$VERIFY_STATUS" != "pass" && "$VERIFY_STATUS" != "fail" ]]; then
     echo "Verifier returned invalid status: $VERIFY_STATUS" >&2
     exit 1
-  fi
-}
-
-generate_commit_message() {
-  local issue="$1"
-  local title="$2"
-  local out="$TMPDIR/commit-message.jsonl"
-  local last="$TMPDIR/commit-message.json"
-
-  save_state "commit_message" "$CYCLE" ""
-  if ! codex_afk_exec \
-    --json \
-    --cd "$PWD" \
-    --output-schema "$COMMIT_SCHEMA" \
-    --output-last-message "$last" \
-    "$(cat <<PROMPT
-Generate a commit message for the current staged or unstaged repository changes.
-
-Local issue:
-
-${issue}
-
-Issue title: ${title}
-
-Inspect the current diff yourself. Return JSON matching the schema:
-- subject: imperative commit subject, 72 chars or fewer if practical
-- body: concise commit body, or empty string if no body is needed
-
-Do not edit files.
-Do not commit.
-PROMPT
-)" | show_codex_progress "$out"; then
-    save_state "commit_message" "$CYCLE" ""
-    return 1
-  fi
-
-  COMMIT_SUBJECT="$(jq -r '.subject' "$last")"
-  COMMIT_BODY="$(jq -r '.body' "$last")"
-
-  if [[ -z "$COMMIT_SUBJECT" || "$COMMIT_SUBJECT" == "null" ]]; then
-    echo "Commit message agent returned empty subject." >&2
-    exit 1
-  fi
-}
-
-commit_changes() {
-  if [[ -n "$COMMIT_BODY" && "$COMMIT_BODY" != "null" ]]; then
-    git commit -m "$COMMIT_SUBJECT" -m "$COMMIT_BODY"
-  else
-    git commit -m "$COMMIT_SUBJECT"
   fi
 }
 
@@ -496,7 +515,7 @@ if (($# != 0)); then
   exit 2
 fi
 
-require_cmd codex
+require_cmd sbx
 require_cmd git
 require_cmd jq
 
@@ -517,15 +536,12 @@ STATE_PATH=""
 STATE_PHASE=""
 CYCLE=1
 SAVED_FEEDBACK=""
-THREAD_ID=""
+SESSION_ID=""
 VERIFY_STATUS=""
 VERIFY_SUMMARY=""
 VERIFY_FEEDBACK=""
 VERIFY_COMMANDS=""
-COMMIT_SUBJECT=""
-COMMIT_BODY=""
-VERIFY_SCHEMA=""
-COMMIT_SCHEMA=""
+VERIFY_COMMIT=""
 
 EXISTING_STATE="$(active_state_file)"
 if [[ -n "$EXISTING_STATE" ]]; then
@@ -549,12 +565,10 @@ else
   echo "Selected issue: $ISSUE_PATH"
 fi
 
-write_schemas
-
 while true; do
   case "$STATE_PHASE" in
     initial_implement)
-      if [[ -n "$THREAD_ID" ]]; then
+      if [[ -n "$SESSION_ID" ]]; then
         echo "Resuming interrupted implementer"
         continue_implementer "$ISSUE_PATH" "$CYCLE" "$CYCLE"
       else
@@ -565,16 +579,21 @@ while true; do
       echo "Resuming implementer after verifier feedback"
       resume_implementer "$ISSUE_PATH" "$CYCLE" "$SAVED_FEEDBACK"
       ;;
+    code_quality)
+      echo "Code-quality cycle $CYCLE/$MAX_CYCLES"
+      run_code_quality "$ISSUE_PATH" "$ISSUE_TITLE" "$CYCLE"
+      ;;
     verify)
       echo "Verification cycle $CYCLE/$MAX_CYCLES"
       run_verifier "$ISSUE_PATH" "$ISSUE_TITLE" "$CYCLE"
 
       if [[ "$VERIFY_STATUS" == "pass" ]]; then
-        set_issue_status "$ISSUE_PATH" complete
-        append_issue_comment "$ISSUE_PATH" "AFK completed" "$VERIFY_SUMMARY"
-        STATE_PHASE="commit_message"
-        save_state "$STATE_PHASE" "$CYCLE" ""
-        continue
+        clear_state
+        echo "Completed issue: $ISSUE_PATH"
+        if [[ -n "$VERIFY_COMMIT" && "$VERIFY_COMMIT" != "null" ]]; then
+          echo "Commit: $VERIFY_COMMIT"
+        fi
+        exit 0
       fi
 
       echo "Verifier failed cycle $CYCLE/$MAX_CYCLES"
@@ -588,14 +607,6 @@ while true; do
       fi
 
       resume_implementer "$ISSUE_PATH" "$CYCLE" "$VERIFY_FEEDBACK"
-      ;;
-    commit_message)
-      generate_commit_message "$ISSUE_PATH" "$ISSUE_TITLE"
-      git add -A
-      commit_changes
-      clear_state
-      echo "Completed issue: $ISSUE_PATH"
-      exit 0
       ;;
     *)
       echo "Unknown AFK state phase: $STATE_PHASE" >&2
