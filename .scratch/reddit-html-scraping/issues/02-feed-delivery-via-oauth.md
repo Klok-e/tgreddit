@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Feed Delivery Via OAuth
 
@@ -21,3 +21,7 @@ Switch subreddit top feed fetching to authenticated Reddit JSON through the OAut
 ## Blocked by
 
 - .scratch/reddit-html-scraping/issues/01-oauth-transport.md
+
+## AFK completed
+
+Verified subreddit top feed delivery now uses the OAuth JSON transport with `raw_json=1`, deterministic fixture coverage confirms existing post classifications and gallery metadata, and `cargo fmt && cargo clippy && cargo test` passes.

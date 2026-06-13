@@ -198,14 +198,9 @@ fn header_value(value: &str) -> Result<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reddit::test_server::{TestResponse, TestServer, TestServerConfig};
     use serde_json::Value;
-    use std::{
-        collections::HashMap,
-        io::{BufRead, BufReader, Read, Write},
-        net::{TcpListener, TcpStream},
-        sync::mpsc,
-        thread,
-    };
+    use std::collections::HashMap;
 
     #[test]
     fn token_response_parsing_stores_expiry_and_session_headers() {
@@ -238,7 +233,21 @@ mod tests {
             .unwrap();
 
         runtime.block_on(async {
-            let server = TestServer::start();
+            let mut responses_by_path = HashMap::new();
+            responses_by_path.insert(
+                "/r/rust/top.json".to_owned(),
+                TestResponse::json(r#"{"ok":true}"#),
+            );
+            let server = TestServer::start(TestServerConfig {
+                token_response: Some(TestResponse::json_with_session(
+                    r#"{"access_token":"secret-token","expires_in":86400}"#,
+                    "loid-123",
+                    "session-456",
+                )),
+                responses_by_path,
+                default_response: None,
+                stop_after: 2,
+            });
             let transport =
                 RedditOAuthTransport::with_base_urls(&server.base_url(), &server.base_url())
                     .unwrap();
@@ -292,116 +301,5 @@ mod tests {
         let url = transport.oauth_url("/r/rust/top.json").unwrap();
 
         assert_eq!(url.as_str(), "https://oauth.reddit.com/r/rust/top.json");
-    }
-
-    struct TestServer {
-        base_url: String,
-        handle: thread::JoinHandle<Vec<RecordedRequest>>,
-    }
-
-    impl TestServer {
-        fn start() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let base_url = format!("http://{}", listener.local_addr().unwrap());
-            let (ready_tx, ready_rx) = mpsc::channel();
-            let handle = thread::spawn(move || {
-                ready_tx.send(()).unwrap();
-                let mut requests = Vec::new();
-                for _ in 0..3 {
-                    let (stream, _) = listener.accept().unwrap();
-                    let request = read_request(&stream);
-                    if request.path == "/auth/v2/oauth/access-token/loid" {
-                        write_response(
-                            stream,
-                            &[
-                                ("content-type", "application/json"),
-                                ("x-reddit-loid", "loid-123"),
-                                ("x-reddit-session", "session-456"),
-                            ],
-                            r#"{"access_token":"secret-token","expires_in":86400}"#,
-                        );
-                    } else {
-                        write_response(
-                            stream,
-                            &[("content-type", "application/json")],
-                            r#"{"ok":true}"#,
-                        );
-                    }
-                    requests.push(request);
-                }
-                requests
-            });
-            ready_rx.recv().unwrap();
-            Self { base_url, handle }
-        }
-
-        fn base_url(&self) -> String {
-            self.base_url.clone()
-        }
-
-        fn join(self) -> Vec<RecordedRequest> {
-            self.handle.join().unwrap()
-        }
-    }
-
-    #[derive(Debug)]
-    struct RecordedRequest {
-        method: String,
-        path: String,
-        query: String,
-        headers: HashMap<String, String>,
-        body: String,
-    }
-
-    fn read_request(stream: &TcpStream) -> RecordedRequest {
-        let mut reader = BufReader::new(stream);
-        let mut first_line = String::new();
-        reader.read_line(&mut first_line).unwrap();
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap().to_owned();
-        let target = parts.next().unwrap().to_owned();
-        let (path, query) = target
-            .split_once('?')
-            .map(|(path, query)| (path.to_owned(), query.to_owned()))
-            .unwrap_or((target, String::new()));
-
-        let mut headers = HashMap::new();
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            let (name, value) = line.trim_end().split_once(": ").unwrap();
-            headers.insert(name.to_ascii_lowercase(), value.to_owned());
-        }
-
-        let content_length = headers
-            .get("content-length")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = vec![0; content_length];
-        reader.read_exact(&mut body).unwrap();
-
-        RecordedRequest {
-            method,
-            path,
-            query,
-            headers,
-            body: String::from_utf8(body).unwrap(),
-        }
-    }
-
-    fn write_response(mut stream: TcpStream, headers: &[(&str, &str)], body: &str) {
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n",
-            body.len()
-        )
-        .unwrap();
-        for (name, value) in headers {
-            write!(stream, "{name}: {value}\r\n").unwrap();
-        }
-        write!(stream, "\r\n{body}").unwrap();
     }
 }
