@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # OAuth Transport
 
@@ -23,3 +23,9 @@ This slice should prove the bot can make an authenticated JSON request to Reddit
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+### AFK completed
+
+OAuth transport slice meets issue acceptance criteria; validation passed; scope limited to src/reddit/oauth.rs test-harness change in current worktree.
