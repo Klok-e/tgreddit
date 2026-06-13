@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Remove Fake Reddit Server
 
@@ -22,3 +22,7 @@ Remove the local fake Reddit HTTP server from normal tests and keep OAuth transp
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+AFK completed: Removed the fake Reddit test server, deleted server-backed OAuth/API tests, and removed the test-only custom base URL constructor while keeping pure OAuth parsing/default URL tests passing.

@@ -51,16 +51,12 @@ pub struct RedditOAuthTransport {
 
 impl RedditOAuthTransport {
     pub fn new() -> Result<Self> {
-        Self::with_base_urls(AUTH_BASE_URL, OAUTH_BASE_URL)
-    }
-
-    pub(crate) fn with_base_urls(auth_base_url: &str, oauth_base_url: &str) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
                 .user_agent(ANDROID_USER_AGENT)
                 .build()?,
-            auth_base_url: Url::parse(auth_base_url)?,
-            oauth_base_url: Url::parse(oauth_base_url)?,
+            auth_base_url: Url::parse(AUTH_BASE_URL)?,
+            oauth_base_url: Url::parse(OAUTH_BASE_URL)?,
             device_id: format!(
                 "tgreddit-{}",
                 Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -198,9 +194,6 @@ fn header_value(value: &str) -> Result<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reddit::test_server::{TestResponse, TestServer, TestServerConfig};
-    use serde_json::Value;
-    use std::collections::HashMap;
 
     #[test]
     fn token_response_parsing_stores_expiry_and_session_headers() {
@@ -222,76 +215,6 @@ mod tests {
         assert_eq!(token.extra_headers["x-reddit-loid"], "loid-123");
         assert_eq!(token.extra_headers["x-reddit-session"], "session-456");
         assert!(!format!("{token:?}").contains("secret-token"));
-    }
-
-    #[test]
-    fn authenticated_json_request_uses_token_and_app_headers() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let mut responses_by_path = HashMap::new();
-            responses_by_path.insert(
-                "/r/rust/top.json".to_owned(),
-                TestResponse::json(r#"{"ok":true}"#),
-            );
-            let server = TestServer::start(TestServerConfig {
-                token_response: Some(TestResponse::json_with_session(
-                    r#"{"access_token":"secret-token","expires_in":86400}"#,
-                    "loid-123",
-                    "session-456",
-                )),
-                responses_by_path,
-                default_response: None,
-                stop_after: 2,
-            });
-            let transport =
-                RedditOAuthTransport::with_base_urls(&server.base_url(), &server.base_url())
-                    .unwrap();
-
-            let json: Value = transport
-                .get_json("/r/rust/top.json", &[("limit", "1".to_owned())])
-                .await
-                .unwrap();
-
-            assert_eq!(json["ok"], true);
-            let second_json: Value = transport
-                .get_json("/r/rust/top.json", &[("limit", "2".to_owned())])
-                .await
-                .unwrap();
-
-            assert_eq!(second_json["ok"], true);
-            let requests = server.join();
-            assert_eq!(requests.len(), 3);
-
-            let token_request = &requests[0];
-            assert_eq!(token_request.method, "POST");
-            assert_eq!(token_request.path, "/auth/v2/oauth/access-token/loid");
-            assert!(token_request.headers["authorization"].starts_with("Basic "));
-            assert_eq!(token_request.headers["user-agent"], ANDROID_USER_AGENT);
-            assert_eq!(token_request.headers["x-reddit-compression"], "1");
-            assert!(token_request.body.contains("\"scopes\""));
-
-            let api_request = &requests[1];
-            assert_eq!(api_request.method, "GET");
-            assert_eq!(api_request.path, "/r/rust/top.json");
-            assert_eq!(api_request.query, "raw_json=1&limit=1");
-            assert_eq!(api_request.headers["authorization"], "Bearer secret-token");
-            assert_eq!(api_request.headers["user-agent"], ANDROID_USER_AGENT);
-            assert_eq!(api_request.headers["x-reddit-loid"], "loid-123");
-            assert_eq!(api_request.headers["x-reddit-session"], "session-456");
-
-            let cached_api_request = &requests[2];
-            assert_eq!(cached_api_request.method, "GET");
-            assert_eq!(cached_api_request.query, "raw_json=1&limit=2");
-            assert_eq!(
-                cached_api_request.headers["authorization"],
-                "Bearer secret-token"
-            );
-        });
     }
 
     #[test]
