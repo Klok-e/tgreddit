@@ -1,0 +1,5 @@
+# Local-only Telegram E2E settings.
+#
+# Copy to telegram-e2e.toml and set the test channel/chat id.
+# The ignored E2E tests read the bot token and app settings from tgreddit.toml.
+chat_id = -1000000000000

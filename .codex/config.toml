@@ -3,4 +3,4 @@ network_access = true
 
 [features.network_proxy]
 enabled = true
-domains = { "oauth.reddit.com" = "allow", "www.reddit.com" = "allow", "old.reddit.com" = "allow" }
+domains = { "oauth.reddit.com" = "allow", "www.reddit.com" = "allow", "old.reddit.com" = "allow", "api.telegram.org" = "allow", "i.redd.it" = "allow", "preview.redd.it" = "allow", "v.redd.it" = "allow", "packaged-media.redd.it" = "allow" }

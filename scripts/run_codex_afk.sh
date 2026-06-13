@@ -130,6 +130,81 @@ issue_title() {
   fi
 }
 
+state_path_for_issue() {
+  local issue="$1"
+  local feature_dir
+
+  feature_dir="$(dirname "$(dirname "$issue")")"
+  printf '%s/.afk-state.json\n' "$feature_dir"
+}
+
+active_state_file() {
+  local states
+
+  mapfile -t states < <(find .scratch -path '*/.afk-state.json' -type f 2>/dev/null | sort)
+  if ((${#states[@]} > 1)); then
+    echo "Multiple AFK state files found; remove all but one before resuming:" >&2
+    printf '%s\n' "${states[@]}" >&2
+    exit 1
+  fi
+  if ((${#states[@]} == 1)); then
+    printf '%s\n' "${states[0]}"
+  fi
+}
+
+load_state() {
+  local state="$1"
+
+  ISSUE_PATH="$(jq -r '.issue_path' "$state")"
+  ISSUE_TITLE="$(jq -r '.issue_title' "$state")"
+  STATE_PHASE="$(jq -r '.phase' "$state")"
+  CYCLE="$(jq -r '.cycle' "$state")"
+  THREAD_ID="$(jq -r '.thread_id // ""' "$state")"
+  SAVED_FEEDBACK="$(jq -r '.feedback // ""' "$state")"
+  STATE_PATH="$state"
+}
+
+save_state() {
+  local phase="$1"
+  local cycle="$2"
+  local feedback="${3:-}"
+  local tmp_file="$TMPDIR/afk-state.json"
+
+  jq -n \
+    --arg issue_path "$ISSUE_PATH" \
+    --arg issue_title "$ISSUE_TITLE" \
+    --arg phase "$phase" \
+    --arg thread_id "$THREAD_ID" \
+    --arg feedback "$feedback" \
+    --argjson cycle "$cycle" \
+    '{
+      version: 1,
+      issue_path: $issue_path,
+      issue_title: $issue_title,
+      phase: $phase,
+      cycle: $cycle,
+      thread_id: $thread_id,
+      feedback: $feedback
+    }' > "$tmp_file"
+  mv "$tmp_file" "$STATE_PATH"
+}
+
+clear_state() {
+  if [[ -n "${STATE_PATH:-}" && -f "$STATE_PATH" ]]; then
+    rm -f "$STATE_PATH"
+  fi
+}
+
+capture_thread_id() {
+  local out="$1"
+  local captured
+
+  captured="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out" | sed -n '1p')"
+  if [[ -n "$captured" && "$captured" != "null" ]]; then
+    THREAD_ID="$captured"
+  fi
+}
+
 set_issue_status() {
   local issue="$1"
   local status="$2"
@@ -218,7 +293,8 @@ run_initial_implementer() {
   local out="$TMPDIR/implement-initial.jsonl"
   local last="$TMPDIR/implement-initial.txt"
 
-  codex_afk_exec \
+  save_state "initial_implement" 1 ""
+  if ! codex_afk_exec \
     --json \
     --cd "$PWD" \
     --output-last-message "$last" \
@@ -240,13 +316,44 @@ Rules:
 - Do not change unrelated behavior.
 - Leave the worktree ready for an independent verifier.
 PROMPT
-)" | show_codex_progress "$out"
+)" | show_codex_progress "$out"; then
+    capture_thread_id "$out"
+    save_state "initial_implement" 1 ""
+    return 1
+  fi
 
-  THREAD_ID="$(jq -r 'select(.type == "thread.started") | .thread_id' "$out" | sed -n '1p')"
+  capture_thread_id "$out"
   if [[ -z "$THREAD_ID" || "$THREAD_ID" == "null" ]]; then
     echo "Could not capture implementer thread id." >&2
     exit 1
   fi
+  save_state "verify" 1 ""
+}
+
+continue_implementer() {
+  local issue="$1"
+  local cycle="$2"
+  local next_cycle="$3"
+  local out="$TMPDIR/implement-continue-${cycle}.jsonl"
+  local last="$TMPDIR/implement-continue-${cycle}.txt"
+
+  if ! codex_afk_resume \
+    --json \
+    --output-last-message "$last" \
+    "$THREAD_ID" \
+    "$(cat <<PROMPT
+Continue the AFK implementation for local issue:
+
+${issue}
+
+Continue from the current repository state. Do not commit. Leave the worktree ready for verification.
+PROMPT
+)" | show_codex_progress "$out"; then
+    save_state "$STATE_PHASE" "$cycle" "$SAVED_FEEDBACK"
+    return 1
+  fi
+
+  save_state "verify" "$next_cycle" ""
 }
 
 resume_implementer() {
@@ -256,7 +363,8 @@ resume_implementer() {
   local out="$TMPDIR/implement-cycle-${cycle}.jsonl"
   local last="$TMPDIR/implement-cycle-${cycle}.txt"
 
-  codex_afk_resume \
+  save_state "resume_implement" "$cycle" "$feedback"
+  if ! codex_afk_resume \
     --json \
     --output-last-message "$last" \
     "$THREAD_ID" \
@@ -274,7 +382,12 @@ Verifier feedback:
 
 ${feedback}
 PROMPT
-)" | show_codex_progress "$out"
+)" | show_codex_progress "$out"; then
+    save_state "resume_implement" "$cycle" "$feedback"
+    return 1
+  fi
+
+  save_state "verify" "$((cycle + 1))" ""
 }
 
 run_verifier() {
@@ -284,6 +397,7 @@ run_verifier() {
   local out="$TMPDIR/verify-cycle-${cycle}.jsonl"
   local last="$TMPDIR/verify-cycle-${cycle}.json"
 
+  save_state "verify" "$cycle" ""
   if ! codex_afk_exec \
     --json \
     --cd "$PWD" \
@@ -312,14 +426,8 @@ Return JSON matching the schema:
 - commands_run: validation commands you ran
 PROMPT
 )" | show_codex_progress "$out"; then
-    cat > "$last" <<'JSON'
-{
-  "status": "fail",
-  "summary": "Verifier command failed.",
-  "feedback": "The verifier Codex run exited nonzero. Inspect temporary runner output from this invocation if available, then rerun.",
-  "commands_run": []
-}
-JSON
+    save_state "verify" "$cycle" ""
+    return 1
   fi
 
   VERIFY_STATUS="$(jq -r '.status' "$last")"
@@ -339,7 +447,8 @@ generate_commit_message() {
   local out="$TMPDIR/commit-message.jsonl"
   local last="$TMPDIR/commit-message.json"
 
-  codex_afk_exec \
+  save_state "commit_message" "$CYCLE" ""
+  if ! codex_afk_exec \
     --json \
     --cd "$PWD" \
     --output-schema "$COMMIT_SCHEMA" \
@@ -360,7 +469,10 @@ Inspect the current diff yourself. Return JSON matching the schema:
 Do not edit files.
 Do not commit.
 PROMPT
-)" | show_codex_progress "$out"
+)" | show_codex_progress "$out"; then
+    save_state "commit_message" "$CYCLE" ""
+    return 1
+  fi
 
   COMMIT_SUBJECT="$(jq -r '.subject' "$last")"
   COMMIT_BODY="$(jq -r '.body' "$last")"
@@ -388,26 +500,23 @@ require_cmd codex
 require_cmd git
 require_cmd jq
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Working tree is dirty. Refusing to start." >&2
-  exit 1
-fi
-
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+cleanup() {
+  local status=$?
+
+  rm -rf "$TMPDIR"
+  if ((status != 0)) && [[ -n "${STATE_PATH:-}" && -f "${STATE_PATH:-}" ]]; then
+    echo "AFK state saved: $STATE_PATH" >&2
+  fi
+}
+trap cleanup EXIT
 
 SKIP_REASONS="$TMPDIR/skipped-issues.txt"
 
-ISSUE_PATH="$(first_runnable_issue || true)"
-if [[ -z "$ISSUE_PATH" ]]; then
-  echo "No runnable ready-for-agent issues found under .scratch/*/issues/*.md" >&2
-  if [[ -s "$SKIP_REASONS" ]]; then
-    echo >&2
-    cat "$SKIP_REASONS" >&2
-  fi
-  exit 1
-fi
-
+STATE_PATH=""
+STATE_PHASE=""
+CYCLE=1
+SAVED_FEEDBACK=""
 THREAD_ID=""
 VERIFY_STATUS=""
 VERIFY_SUMMARY=""
@@ -418,34 +527,81 @@ COMMIT_BODY=""
 VERIFY_SCHEMA=""
 COMMIT_SCHEMA=""
 
-ISSUE_TITLE="$(issue_title "$ISSUE_PATH")"
-write_schemas
-
-echo "Selected issue: $ISSUE_PATH"
-run_initial_implementer "$ISSUE_PATH" "$ISSUE_TITLE"
-
-for cycle in $(seq 1 "$MAX_CYCLES"); do
-  echo "Verification cycle $cycle/$MAX_CYCLES"
-  run_verifier "$ISSUE_PATH" "$ISSUE_TITLE" "$cycle"
-
-  if [[ "$VERIFY_STATUS" == "pass" ]]; then
-    set_issue_status "$ISSUE_PATH" complete
-    append_issue_comment "$ISSUE_PATH" "AFK completed" "$VERIFY_SUMMARY"
-    generate_commit_message "$ISSUE_PATH" "$ISSUE_TITLE"
-    git add -A
-    commit_changes
-    echo "Completed issue: $ISSUE_PATH"
-    exit 0
-  fi
-
-  echo "Verifier failed cycle $cycle/$MAX_CYCLES"
-
-  if ((cycle == MAX_CYCLES)); then
-    set_issue_status "$ISSUE_PATH" blocked
-    append_issue_comment "$ISSUE_PATH" "AFK blocked after ${MAX_CYCLES} cycles" "$VERIFY_FEEDBACK"
-    echo "Blocked issue after $MAX_CYCLES cycles: $ISSUE_PATH" >&2
+EXISTING_STATE="$(active_state_file)"
+if [[ -n "$EXISTING_STATE" ]]; then
+  load_state "$EXISTING_STATE"
+  echo "Resuming issue: $ISSUE_PATH"
+  echo "AFK state: $STATE_PATH"
+else
+  ISSUE_PATH="$(first_runnable_issue || true)"
+  if [[ -z "$ISSUE_PATH" ]]; then
+    echo "No runnable ready-for-agent issues found under .scratch/*/issues/*.md" >&2
+    if [[ -s "$SKIP_REASONS" ]]; then
+      echo >&2
+      cat "$SKIP_REASONS" >&2
+    fi
     exit 1
   fi
 
-  resume_implementer "$ISSUE_PATH" "$cycle" "$VERIFY_FEEDBACK"
+  ISSUE_TITLE="$(issue_title "$ISSUE_PATH")"
+  STATE_PATH="$(state_path_for_issue "$ISSUE_PATH")"
+  STATE_PHASE="initial_implement"
+  echo "Selected issue: $ISSUE_PATH"
+fi
+
+write_schemas
+
+while true; do
+  case "$STATE_PHASE" in
+    initial_implement)
+      if [[ -n "$THREAD_ID" ]]; then
+        echo "Resuming interrupted implementer"
+        continue_implementer "$ISSUE_PATH" "$CYCLE" "$CYCLE"
+      else
+        run_initial_implementer "$ISSUE_PATH" "$ISSUE_TITLE"
+      fi
+      ;;
+    resume_implement)
+      echo "Resuming implementer after verifier feedback"
+      resume_implementer "$ISSUE_PATH" "$CYCLE" "$SAVED_FEEDBACK"
+      ;;
+    verify)
+      echo "Verification cycle $CYCLE/$MAX_CYCLES"
+      run_verifier "$ISSUE_PATH" "$ISSUE_TITLE" "$CYCLE"
+
+      if [[ "$VERIFY_STATUS" == "pass" ]]; then
+        set_issue_status "$ISSUE_PATH" complete
+        append_issue_comment "$ISSUE_PATH" "AFK completed" "$VERIFY_SUMMARY"
+        STATE_PHASE="commit_message"
+        save_state "$STATE_PHASE" "$CYCLE" ""
+        continue
+      fi
+
+      echo "Verifier failed cycle $CYCLE/$MAX_CYCLES"
+
+      if ((CYCLE == MAX_CYCLES)); then
+        set_issue_status "$ISSUE_PATH" blocked
+        append_issue_comment "$ISSUE_PATH" "AFK blocked after ${MAX_CYCLES} cycles" "$VERIFY_FEEDBACK"
+        clear_state
+        echo "Blocked issue after $MAX_CYCLES cycles: $ISSUE_PATH" >&2
+        exit 1
+      fi
+
+      resume_implementer "$ISSUE_PATH" "$CYCLE" "$VERIFY_FEEDBACK"
+      ;;
+    commit_message)
+      generate_commit_message "$ISSUE_PATH" "$ISSUE_TITLE"
+      git add -A
+      commit_changes
+      clear_state
+      echo "Completed issue: $ISSUE_PATH"
+      exit 0
+      ;;
+    *)
+      echo "Unknown AFK state phase: $STATE_PHASE" >&2
+      exit 1
+      ;;
+  esac
+
+  load_state "$STATE_PATH"
 done

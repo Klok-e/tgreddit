@@ -1,9 +1,10 @@
-use crate::*;
 use crate::{
     db::Recordable,
     reddit::{self},
+    types::{ButtonCallbackData, Subscription, Video},
 };
 use itertools::Itertools;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 fn escape(html: &str) -> String {
     html.replace('<', "&lt;").replace('>', "&gt;")
@@ -16,7 +17,7 @@ fn format_html_anchor(href: &str, text: &str) -> String {
 fn format_subreddit_link(subreddit: &str, base_url: Option<&str>) -> String {
     format_html_anchor(
         &reddit::format_subreddit_url(subreddit, base_url),
-        &format!("/r/{}", &subreddit),
+        &format!("/r/{subreddit}"),
     )
 }
 
@@ -113,6 +114,7 @@ pub fn format_subscription_list(post: &[Subscription]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reddit::TopPostsTimePeriod;
 
     #[test]
     fn test_format_html_anchor() {

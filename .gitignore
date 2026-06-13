@@ -1,1 +1,4 @@
 /target
+/tgreddit.toml
+/telegram-e2e.toml
+/.scratch/*/.afk-state.json

@@ -1,14 +1,16 @@
-use crate::{handle_post::process_post, types::*};
 use anyhow::{Context, Result};
-use handle_post::handle_new_post;
 use log::*;
-use reddit::{PostType, TopPostsTimePeriod};
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     iterator::Signals,
 };
+use tgreddit::{
+    args, bot, config, db,
+    handle_post::{handle_new_post, process_post},
+    reddit,
+    types::*,
+};
 
-use std::string::ToString;
 use std::{
     sync::{
         Arc,
@@ -16,24 +18,8 @@ use std::{
     },
     time::Duration,
 };
-use teloxide::types::InputMediaPhoto;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile};
-use teloxide::{prelude::*, types::InputMedia};
-
+use teloxide::prelude::*;
 use tokio::sync::broadcast;
-
-mod args;
-mod bot;
-mod config;
-mod db;
-mod download;
-mod handle_post;
-mod messages;
-mod reddit;
-mod types;
-mod ytdlp;
-
-const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 #[tokio::main]
 async fn main() -> Result<()> {

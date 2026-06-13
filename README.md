@@ -24,6 +24,27 @@ $ cargo install tgreddit
 
 Depends on [yt-dlp][yt-dlp] (and for good results, yt-dlp requires ffmpeg).
 
+## testing
+
+Normal validation:
+
+```sh
+cargo fmt --check
+cargo clippy
+cargo test
+```
+
+Live Telegram E2E tests are ignored because they use real network, Reddit
+fixtures, and the configured Telegram test channel. They read app settings from
+`tgreddit.toml` and the target chat from `telegram-e2e.toml`.
+
+```sh
+cp telegram-e2e.example.toml telegram-e2e.toml
+CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture
+```
+
+The E2E tests intentionally leave sent messages in the test channel.
+
 ## bot commands
 
 ### `/sub <subreddit> [limit=<limit>] [time=<time>] [filter=<filter>]`

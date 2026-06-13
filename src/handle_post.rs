@@ -147,7 +147,7 @@ async fn download_gallery(post: &reddit::Post) -> Result<HashMap<String, (PathBu
             .as_ref()
             .context("Media metadata not available")?;
         let url = &s.url.replace("&amp;", "&");
-        info!("got media id={id} x={} y={} url={}", &s.x, &s.y, url);
+        info!("got media id={id} x={} y={} url={}", s.x, s.y, url);
         map.insert(id.to_string(), download_url_to_tmp(url).await?);
     }
 
