@@ -8,7 +8,32 @@ VERIFIER_MODEL="openai/gpt-5.5"
 SBX_PROFILE="${SBX_PROFILE:-opencode-tgreddit}"
 
 usage() {
-  echo "Usage: scripts/run_opencode_afk.sh" >&2
+  echo "Usage: scripts/run_opencode_afk.sh [--prd <feature-slug|path-to-PRD.md>]" >&2
+}
+
+parse_args() {
+  REQUESTED_PRD=""
+
+  while (($# > 0)); do
+    case "$1" in
+      --prd)
+        if (($# < 2)) || [[ -z "$2" ]]; then
+          usage
+          exit 2
+        fi
+        REQUESTED_PRD="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+  done
 }
 
 require_cmd() {
@@ -273,8 +298,10 @@ is_runnable_issue() {
   return 0
 }
 
-first_runnable_issue() {
-  find .scratch -path '*/issues/*.md' -type f 2>/dev/null \
+first_runnable_issue_in_feature() {
+  local feature_dir="$1"
+
+  find "$feature_dir/issues" -name '*.md' -type f 2>/dev/null \
     | sort \
     | while IFS= read -r issue; do
       if is_runnable_issue "$issue"; then
@@ -282,6 +309,93 @@ first_runnable_issue() {
         return 0
       fi
     done
+}
+
+feature_dir_for_issue() {
+  local issue="$1"
+
+  dirname "$(dirname "$issue")"
+}
+
+feature_dir_for_prd() {
+  local prd="$1"
+
+  dirname "$prd"
+}
+
+normalize_prd_path() {
+  local prd="$1"
+
+  case "$prd" in
+    ./*)
+      printf '%s\n' "${prd#./}"
+      ;;
+    *)
+      printf '%s\n' "$prd"
+      ;;
+  esac
+}
+
+resolve_prd() {
+  local requested="$1"
+  local prd
+  local feature_dir
+
+  if [[ "$requested" == */* ]]; then
+    prd="$(normalize_prd_path "$requested")"
+  else
+    prd=".scratch/$requested/PRD.md"
+  fi
+
+  if [[ ! -f "$prd" ]]; then
+    echo "PRD not found: $requested" >&2
+    exit 1
+  fi
+  if [[ "$(basename "$prd")" != "PRD.md" ]]; then
+    echo "Selected path is not a PRD.md file: $prd" >&2
+    exit 1
+  fi
+  feature_dir="$(feature_dir_for_prd "$prd")"
+  if [[ "$(dirname "$feature_dir")" != ".scratch" ]]; then
+    echo "PRD must be under .scratch/<feature>/PRD.md: $prd" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$prd"
+}
+
+select_prd() {
+  local -a prds
+  local choice
+  local i
+
+  mapfile -t prds < <(find .scratch -mindepth 2 -maxdepth 2 -name 'PRD.md' -type f 2>/dev/null | sort)
+  if ((${#prds[@]} == 0)); then
+    echo "No PRDs found under .scratch/*/PRD.md" >&2
+    exit 1
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "No PRD selected and stdin is not interactive. Pass --prd <feature-slug|path-to-PRD.md>." >&2
+    exit 1
+  fi
+
+  echo "Select PRD to work on:" >&2
+  for i in "${!prds[@]}"; do
+    printf '%d) %s\n' "$((i + 1))" "${prds[$i]}" >&2
+  done
+
+  while true; do
+    printf 'PRD number: ' >&2
+    if ! IFS= read -r choice; then
+      echo "No PRD selected." >&2
+      exit 1
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#prds[@]})); then
+      printf '%s\n' "${prds[$((choice - 1))]}"
+      return 0
+    fi
+    echo "Invalid PRD selection: $choice" >&2
+  done
 }
 
 issue_title() {
@@ -816,10 +930,8 @@ PROMPT
   fi
 }
 
-if (($# != 0)); then
-  usage
-  exit 2
-fi
+REQUESTED_PRD=""
+parse_args "$@"
 
 require_cmd sbx
 require_cmd git
@@ -891,21 +1003,42 @@ VERIFY_SUMMARY=""
 VERIFY_FEEDBACK=""
 VERIFY_COMMANDS=""
 VERIFY_COMMIT=""
+SELECTED_PRD=""
+SELECTED_FEATURE_DIR=""
 
 run_preflight
 
 EXISTING_STATE="$(active_state_file)"
 if [[ -n "$EXISTING_STATE" ]]; then
   load_state "$EXISTING_STATE"
+  if [[ -n "$REQUESTED_PRD" ]]; then
+    SELECTED_PRD="$(resolve_prd "$REQUESTED_PRD")"
+    SELECTED_FEATURE_DIR="$(feature_dir_for_prd "$SELECTED_PRD")"
+    if [[ "$(feature_dir_for_issue "$ISSUE_PATH")" != "$SELECTED_FEATURE_DIR" ]]; then
+      echo "Active AFK state is for $ISSUE_PATH, not selected PRD $SELECTED_PRD." >&2
+      echo "Remove $STATE_PATH to start a different PRD." >&2
+      exit 1
+    fi
+  fi
   echo "Resuming issue: $ISSUE_PATH"
   echo "AFK state: $STATE_PATH"
 else
-  ISSUE_PATH="$(first_runnable_issue || true)"
+  if [[ -n "$REQUESTED_PRD" ]]; then
+    SELECTED_PRD="$(resolve_prd "$REQUESTED_PRD")"
+  else
+    SELECTED_PRD="$(select_prd)"
+  fi
+  SELECTED_FEATURE_DIR="$(feature_dir_for_prd "$SELECTED_PRD")"
+  echo "Selected PRD: $SELECTED_PRD"
+
+  ISSUE_PATH="$(first_runnable_issue_in_feature "$SELECTED_FEATURE_DIR" || true)"
   if [[ -z "$ISSUE_PATH" ]]; then
-    echo "No runnable ready-for-agent issues found under .scratch/*/issues/*.md" >&2
+    echo "No runnable ready-for-agent issues found under $SELECTED_FEATURE_DIR/issues/*.md" >&2
     if [[ -s "$SKIP_REASONS" ]]; then
       echo >&2
-      cat "$SKIP_REASONS" >&2
+      while IFS= read -r line; do
+        echo "$line" >&2
+      done < "$SKIP_REASONS"
     fi
     exit 1
   fi
