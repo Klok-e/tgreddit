@@ -43,7 +43,9 @@ Prefer `anyhow::Result` for fallible application flow. Use typed errors, such as
 
 Tests use Rust's built-in test framework and are colocated with the modules they cover in `#[cfg(test)]` blocks. Add or update tests for command parsing, database behavior, message formatting, Reddit post classification, and `yt-dlp` output parsing.
 
-Keep unit tests deterministic. Do not make normal tests depend on live Reddit or Telegram APIs unless they are explicitly introduced as integration tests.
+See `docs/agents/testing.md` for the full testing policy.
+
+Keep unit tests deterministic. Do not make normal tests depend on live Reddit or Telegram APIs unless they are explicitly introduced as ignored integration tests.
 
 Live Telegram integration tests are ignored by default. They require local `tgreddit.toml` for bot configuration and local `telegram-e2e.toml` for the test chat id. These tests send real messages to the configured Telegram channel and intentionally do not delete them.
 
