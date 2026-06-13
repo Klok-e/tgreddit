@@ -57,30 +57,46 @@ opencode_afk_resume() {
 
 show_opencode_progress() {
   local out="$1"
-  local rendered=""
   local last_tool_summary=""
   local text
-  local delta
+  local clean_line
   local summary
 
   while IFS= read -r line; do
     printf '%s\n' "$line" >> "$out"
-    if ! jq -e . >/dev/null 2>&1 <<< "$line"; then
-      printf '%s\n' "$line"
-      rendered=""
+    clean_line="${line//$'\r'/}"
+
+    if ! jq -e . >/dev/null 2>&1 <<< "$clean_line"; then
+      if [[ "$clean_line" != \{* && "$clean_line" != \[* ]]; then
+        printf '%s\n' "$clean_line"
+      fi
       last_tool_summary=""
       continue
     fi
+
+    while IFS= read -r text; do
+      if [[ -z "$text" ]]; then
+        continue
+      fi
+
+      printf '%s\n' "$text"
+    done < <(jq -r '
+      [
+        .part?,
+        .properties?.part?
+      ]
+      | .[]?
+      | select(type == "object")
+      | select(.type == "text" or .type == "reasoning")
+      | .text?
+      | select(type == "string" and length > 0)
+    ' <<< "$clean_line")
 
     while IFS= read -r summary; do
       if [[ -z "$summary" || "$summary" == "$last_tool_summary" ]]; then
         continue
       fi
 
-      if [[ -n "$rendered" ]]; then
-        printf '\n'
-        rendered=""
-      fi
       printf '%s\n' "$summary"
       last_tool_summary="$summary"
     done < <(jq -r '
@@ -92,15 +108,20 @@ show_opencode_progress() {
       | select(type == "object")
       | select(.type == "tool")
       | select(.tool | type == "string")
+      | .tool as $tool
       | (.state? // {}) as $state
       | ($state.status? // "") as $status
       | (
-          $state.title? //
-          $state.metadata?.description? //
+        $state.title? //
           $state.input?.description? //
+          $state.input?.filePath? //
           $state.input?.command? //
+          (if $status == "error" then $state.error? else empty end) //
           ""
-        ) as $title
+        )
+        | gsub("\r"; "")
+        | split("\n")[0]
+        | .[0:140] as $title
       | (
           if $status == "completed" then "Finished tool"
           elif $status == "error" then "Tool failed"
@@ -108,43 +129,10 @@ show_opencode_progress() {
           else "Tool"
           end
         ) as $prefix
-      | $prefix + ": " + .tool +
+      | $prefix + ": " + $tool +
         (if ($title | type == "string" and length > 0) then " - " + $title else "" end)
-    ' <<< "$line")
-
-    while IFS= read -r text; do
-      if [[ -z "$text" ]]; then
-        continue
-      fi
-
-      if [[ "$text" == "$rendered"* ]]; then
-        delta="${text#"$rendered"}"
-        if [[ -n "$delta" ]]; then
-          printf '%s' "$delta"
-        fi
-      else
-        if [[ -n "$rendered" ]]; then
-          printf '\n'
-        fi
-        printf '%s' "$text"
-      fi
-      rendered="$text"
-    done < <(jq -r '
-      [
-        .part?,
-        .properties?.part?
-      ]
-      | .[]?
-      | select(type == "object")
-      | select(.type == "reasoning")
-      | .text?
-      | select(type == "string")
-    ' <<< "$line")
+    ' <<< "$clean_line")
   done
-
-  if [[ -n "$rendered" ]]; then
-    printf '\n'
-  fi
 }
 
 json_lines() {
