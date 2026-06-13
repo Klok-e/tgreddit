@@ -57,13 +57,94 @@ opencode_afk_resume() {
 
 show_opencode_progress() {
   local out="$1"
+  local rendered=""
+  local last_tool_summary=""
+  local text
+  local delta
+  local summary
 
   while IFS= read -r line; do
     printf '%s\n' "$line" >> "$out"
     if ! jq -e . >/dev/null 2>&1 <<< "$line"; then
       printf '%s\n' "$line"
+      rendered=""
+      last_tool_summary=""
+      continue
     fi
+
+    while IFS= read -r summary; do
+      if [[ -z "$summary" || "$summary" == "$last_tool_summary" ]]; then
+        continue
+      fi
+
+      if [[ -n "$rendered" ]]; then
+        printf '\n'
+        rendered=""
+      fi
+      printf '%s\n' "$summary"
+      last_tool_summary="$summary"
+    done < <(jq -r '
+      [
+        .part?,
+        .properties?.part?
+      ]
+      | .[]?
+      | select(type == "object")
+      | select(.type == "tool")
+      | select(.tool | type == "string")
+      | (.state? // {}) as $state
+      | ($state.status? // "") as $status
+      | (
+          $state.title? //
+          $state.metadata?.description? //
+          $state.input?.description? //
+          $state.input?.command? //
+          ""
+        ) as $title
+      | (
+          if $status == "completed" then "Finished tool"
+          elif $status == "error" then "Tool failed"
+          elif $status == "pending" or $status == "running" then "Running tool"
+          else "Tool"
+          end
+        ) as $prefix
+      | $prefix + ": " + .tool +
+        (if ($title | type == "string" and length > 0) then " - " + $title else "" end)
+    ' <<< "$line")
+
+    while IFS= read -r text; do
+      if [[ -z "$text" ]]; then
+        continue
+      fi
+
+      if [[ "$text" == "$rendered"* ]]; then
+        delta="${text#"$rendered"}"
+        if [[ -n "$delta" ]]; then
+          printf '%s' "$delta"
+        fi
+      else
+        if [[ -n "$rendered" ]]; then
+          printf '\n'
+        fi
+        printf '%s' "$text"
+      fi
+      rendered="$text"
+    done < <(jq -r '
+      [
+        .part?,
+        .properties?.part?
+      ]
+      | .[]?
+      | select(type == "object")
+      | select(.type == "reasoning")
+      | .text?
+      | select(type == "string")
+    ' <<< "$line")
   done
+
+  if [[ -n "$rendered" ]]; then
+    printf '\n'
+  fi
 }
 
 json_lines() {
@@ -219,15 +300,30 @@ active_state_file() {
 
 load_state() {
   local state="$1"
+  local version
 
+  STATE_PATH="$state"
   ISSUE_PATH="$(jq -r '.issue_path' "$state")"
   ISSUE_TITLE="$(jq -r '.issue_title' "$state")"
   IMPLEMENTER_TITLE="$(implementer_title "$ISSUE_PATH")"
   STATE_PHASE="$(jq -r '.phase' "$state")"
   CYCLE="$(jq -r '.cycle' "$state")"
+  SAVED_FEEDBACK="$(jq -r '.feedback // ""' "$state")"
+  version="$(jq -r '.version // 0' "$state")"
+
+  if [[ "$version" != "3" ]]; then
+    IMPLEMENTER_SESSION_ID=""
+    SESSION_PHASE=""
+    SESSION_ID=""
+    save_state "$STATE_PHASE" "$CYCLE" "$SAVED_FEEDBACK"
+    echo "Regenerated AFK state schema: $state"
+    return 0
+  fi
+
+  IMPLEMENTER_SESSION_ID="$(jq -r '.implementer_session_id // ""' "$state")"
+  SESSION_PHASE="$(jq -r '.session_phase // ""' "$state")"
   SESSION_ID="$(jq -r '.session_id // ""' "$state")"
   SAVED_FEEDBACK="$(jq -r '.feedback // ""' "$state")"
-  STATE_PATH="$state"
 }
 
 save_state() {
@@ -240,20 +336,29 @@ save_state() {
     --arg issue_path "$ISSUE_PATH" \
     --arg issue_title "$ISSUE_TITLE" \
     --arg phase "$phase" \
+    --arg implementer_session_id "$IMPLEMENTER_SESSION_ID" \
+    --arg session_phase "$SESSION_PHASE" \
     --arg session_id "$SESSION_ID" \
     --arg feedback "$feedback" \
     --argjson cycle "$cycle" \
     '{
-      version: 2,
+      version: 3,
       harness: "opencode",
       issue_path: $issue_path,
       issue_title: $issue_title,
       phase: $phase,
       cycle: $cycle,
+      implementer_session_id: $implementer_session_id,
+      session_phase: $session_phase,
       session_id: $session_id,
       feedback: $feedback
     }' > "$tmp_file"
   mv "$tmp_file" "$STATE_PATH"
+}
+
+clear_transient_session() {
+  SESSION_PHASE=""
+  SESSION_ID=""
 }
 
 clear_state() {
@@ -272,7 +377,7 @@ recover_implementer_session_id() {
   local sessions="$TMPDIR/opencode-sessions.jsonl"
   local recovered
 
-  if [[ -n "$SESSION_ID" || -z "${IMPLEMENTER_TITLE:-}" ]]; then
+  if [[ -n "$IMPLEMENTER_SESSION_ID" || -z "${IMPLEMENTER_TITLE:-}" ]]; then
     return 0
   fi
 
@@ -293,14 +398,19 @@ recover_implementer_session_id() {
   ' "$sessions" | sed -n '1p')"
 
   if [[ -n "$recovered" && "$recovered" != "null" ]]; then
-    SESSION_ID="$recovered"
-    echo "Recovered implementer session: $SESSION_ID"
+    IMPLEMENTER_SESSION_ID="$recovered"
+    echo "Recovered implementer session: $IMPLEMENTER_SESSION_ID"
   fi
 }
 
 capture_session_id() {
   local out="$1"
+  local target="$2"
   local captured
+
+  if [[ ! -f "$out" ]]; then
+    return 0
+  fi
 
   captured="$(json_lines "$out" | jq -r '
     select(type == "object") |
@@ -317,7 +427,7 @@ capture_session_id() {
     select(type == "string" and length > 0)
   ' | sed -n '1p')"
   if [[ -n "$captured" && "$captured" != "null" ]]; then
-    SESSION_ID="$captured"
+    printf -v "$target" '%s' "$captured"
   fi
 }
 
@@ -425,23 +535,24 @@ Rules:
 - Do not change unrelated behavior.
 - Leave the worktree ready for code-quality review.
 PROMPT
-)" | show_opencode_progress "$out"; then
-    capture_session_id "$out"
-    if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+)" 2>&1 | show_opencode_progress "$out"; then
+    capture_session_id "$out" IMPLEMENTER_SESSION_ID
+    if [[ -z "$IMPLEMENTER_SESSION_ID" || "$IMPLEMENTER_SESSION_ID" == "null" ]]; then
       recover_implementer_session_id || true
     fi
     save_state "initial_implement" 1 ""
     return 1
   fi
 
-  capture_session_id "$out"
-  if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+  capture_session_id "$out" IMPLEMENTER_SESSION_ID
+  if [[ -z "$IMPLEMENTER_SESSION_ID" || "$IMPLEMENTER_SESSION_ID" == "null" ]]; then
     recover_implementer_session_id || true
   fi
-  if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+  if [[ -z "$IMPLEMENTER_SESSION_ID" || "$IMPLEMENTER_SESSION_ID" == "null" ]]; then
     echo "Could not capture implementer session id." >&2
     exit 1
   fi
+  clear_transient_session
   save_state "code_quality" 1 ""
 }
 
@@ -454,7 +565,7 @@ continue_implementer() {
   if ! opencode_afk_resume \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
-    "$SESSION_ID" \
+    "$IMPLEMENTER_SESSION_ID" \
     "$(cat <<PROMPT
 Continue the AFK implementation for local issue:
 
@@ -462,11 +573,12 @@ ${issue}
 
 Continue from the current repository state. Do not commit. Leave the worktree ready for code-quality review.
 PROMPT
-)" | show_opencode_progress "$out"; then
+)" 2>&1 | show_opencode_progress "$out"; then
     save_state "$STATE_PHASE" "$cycle" "$SAVED_FEEDBACK"
     return 1
   fi
 
+  clear_transient_session
   save_state "code_quality" "$next_cycle" ""
 }
 
@@ -476,11 +588,20 @@ resume_implementer() {
   local feedback="$3"
   local out="$TMPDIR/implement-cycle-${cycle}.jsonl"
 
+  if [[ -z "$IMPLEMENTER_SESSION_ID" ]]; then
+    recover_implementer_session_id || true
+  fi
+  if [[ -z "$IMPLEMENTER_SESSION_ID" ]]; then
+    echo "Could not resume implementer: missing implementer session id." >&2
+    echo "Remove $STATE_PATH to restart the issue from scratch." >&2
+    exit 1
+  fi
+
   save_state "resume_implement" "$cycle" "$feedback"
   if ! opencode_afk_resume \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
-    "$SESSION_ID" \
+    "$IMPLEMENTER_SESSION_ID" \
     "$(cat <<PROMPT
 Verifier failed cycle ${cycle} for local issue:
 
@@ -495,11 +616,12 @@ Verifier feedback:
 
 ${feedback}
 PROMPT
-)" | show_opencode_progress "$out"; then
+)" 2>&1 | show_opencode_progress "$out"; then
     save_state "resume_implement" "$cycle" "$feedback"
     return 1
   fi
 
+  clear_transient_session
   save_state "code_quality" "$((cycle + 1))" ""
 }
 
@@ -508,13 +630,9 @@ run_code_quality() {
   local title="$2"
   local cycle="$3"
   local out="$TMPDIR/code-quality-cycle-${cycle}.jsonl"
+  local prompt
 
-  save_state "code_quality" "$cycle" ""
-  if ! opencode_afk_run \
-    afk-code-quality \
-    "$QUALITY_MODEL" \
-    "" \
-    "$(cat <<PROMPT
+  prompt="$(cat <<PROMPT
 You are reviewing and improving the current AFK implementation for local issue:
 
 ${issue}
@@ -530,11 +648,42 @@ Your job:
 
 Leave the worktree ready for final verification.
 PROMPT
-)" | show_opencode_progress "$out"; then
-    save_state "code_quality" "$cycle" ""
-    return 1
+)"
+
+  if [[ "$SESSION_PHASE" != "code_quality" ]]; then
+    clear_transient_session
+  fi
+  if [[ -z "$SESSION_ID" ]]; then
+    SESSION_PHASE="code_quality"
+  fi
+  save_state "code_quality" "$cycle" ""
+  if [[ -n "$SESSION_ID" ]]; then
+    echo "Resumed code-quality session: $SESSION_ID"
+    if ! opencode_afk_resume \
+      afk-code-quality \
+      "$QUALITY_MODEL" \
+      "$SESSION_ID" \
+      "$prompt" 2>&1 | show_opencode_progress "$out"; then
+      capture_session_id "$out" SESSION_ID
+      SESSION_PHASE="code_quality"
+      save_state "code_quality" "$cycle" ""
+      return 1
+    fi
+  else
+    if ! opencode_afk_run \
+      afk-code-quality \
+      "$QUALITY_MODEL" \
+      "" \
+      "$prompt" 2>&1 | show_opencode_progress "$out"; then
+      capture_session_id "$out" SESSION_ID
+      SESSION_PHASE="code_quality"
+      save_state "code_quality" "$cycle" ""
+      return 1
+    fi
   fi
 
+  capture_session_id "$out" SESSION_ID
+  clear_transient_session
   save_state "verify" "$cycle" ""
 }
 
@@ -544,13 +693,9 @@ run_verifier() {
   local cycle="$3"
   local out="$TMPDIR/verify-cycle-${cycle}.jsonl"
   local last="$TMPDIR/verify-cycle-${cycle}.json"
+  local prompt
 
-  save_state "verify" "$cycle" ""
-  if ! opencode_afk_run \
-    afk-verifier \
-    "$VERIFIER_MODEL" \
-    "" \
-    "$(cat <<PROMPT
+  prompt="$(cat <<PROMPT
 You are an independent verifier for local issue:
 
 ${issue}
@@ -582,10 +727,43 @@ Final response requirements:
 - No code fences.
 - Include keys: status, summary, feedback, commands_run, commit.
 PROMPT
-)" | show_opencode_progress "$out"; then
-    save_state "verify" "$cycle" ""
-    return 1
+)"
+
+  if [[ "$SESSION_PHASE" != "verify" ]]; then
+    clear_transient_session
   fi
+  if [[ -z "$SESSION_ID" ]]; then
+    SESSION_PHASE="verify"
+  fi
+  save_state "verify" "$cycle" ""
+  if [[ -n "$SESSION_ID" ]]; then
+    echo "Resumed verifier session: $SESSION_ID"
+    if ! opencode_afk_resume \
+      afk-verifier \
+      "$VERIFIER_MODEL" \
+      "$SESSION_ID" \
+      "$prompt" 2>&1 | show_opencode_progress "$out"; then
+      capture_session_id "$out" SESSION_ID
+      SESSION_PHASE="verify"
+      save_state "verify" "$cycle" ""
+      return 1
+    fi
+  else
+    if ! opencode_afk_run \
+      afk-verifier \
+      "$VERIFIER_MODEL" \
+      "" \
+      "$prompt" 2>&1 | show_opencode_progress "$out"; then
+      capture_session_id "$out" SESSION_ID
+      SESSION_PHASE="verify"
+      save_state "verify" "$cycle" ""
+      return 1
+    fi
+  fi
+
+  capture_session_id "$out" SESSION_ID
+  SESSION_PHASE="verify"
+  save_state "verify" "$cycle" ""
 
   if ! extract_verifier_result "$out" "$last"; then
     echo "Could not extract verifier JSON result." >&2
@@ -617,10 +795,43 @@ require_cmd jq
 TMPDIR="$(mktemp -d)"
 cleanup() {
   local status=$?
+  local recovered=0
 
-  if ((status != 0)) && [[ -n "${STATE_PATH:-}" && -f "${STATE_PATH:-}" && -z "${SESSION_ID:-}" ]]; then
-    recover_implementer_session_id || true
-    if [[ -n "${SESSION_ID:-}" ]]; then
+  if ((status != 0)) && [[ -n "${STATE_PATH:-}" && -f "${STATE_PATH:-}" ]]; then
+    case "${STATE_PHASE:-}" in
+      initial_implement|resume_implement)
+        if [[ -z "${IMPLEMENTER_SESSION_ID:-}" ]]; then
+          recover_implementer_session_id || true
+          if [[ -n "${IMPLEMENTER_SESSION_ID:-}" ]]; then
+            recovered=1
+          fi
+        fi
+        ;;
+      code_quality)
+        if [[ "${SESSION_PHASE:-}" != "code_quality" || -z "${SESSION_ID:-}" ]]; then
+          if [[ -f "$TMPDIR/code-quality-cycle-${CYCLE}.jsonl" ]]; then
+            capture_session_id "$TMPDIR/code-quality-cycle-${CYCLE}.jsonl" SESSION_ID
+            if [[ -n "${SESSION_ID:-}" ]]; then
+              SESSION_PHASE="code_quality"
+              recovered=1
+            fi
+          fi
+        fi
+        ;;
+      verify)
+        if [[ "${SESSION_PHASE:-}" != "verify" || -z "${SESSION_ID:-}" ]]; then
+          if [[ -f "$TMPDIR/verify-cycle-${CYCLE}.jsonl" ]]; then
+            capture_session_id "$TMPDIR/verify-cycle-${CYCLE}.jsonl" SESSION_ID
+            if [[ -n "${SESSION_ID:-}" ]]; then
+              SESSION_PHASE="verify"
+              recovered=1
+            fi
+          fi
+        fi
+        ;;
+    esac
+
+    if ((recovered)); then
       save_state "$STATE_PHASE" "$CYCLE" "$SAVED_FEEDBACK"
     fi
   fi
@@ -638,6 +849,8 @@ STATE_PATH=""
 STATE_PHASE=""
 CYCLE=1
 SAVED_FEEDBACK=""
+IMPLEMENTER_SESSION_ID=""
+SESSION_PHASE=""
 SESSION_ID=""
 IMPLEMENTER_TITLE=""
 VERIFY_STATUS=""
@@ -674,10 +887,10 @@ fi
 while true; do
   case "$STATE_PHASE" in
     initial_implement)
-      if [[ -z "$SESSION_ID" ]]; then
+      if [[ -z "$IMPLEMENTER_SESSION_ID" ]]; then
         recover_implementer_session_id || true
       fi
-      if [[ -n "$SESSION_ID" ]]; then
+      if [[ -n "$IMPLEMENTER_SESSION_ID" ]]; then
         echo "Resuming interrupted implementer"
         continue_implementer "$ISSUE_PATH" "$CYCLE" "$CYCLE"
       else
@@ -715,6 +928,7 @@ while true; do
         exit 1
       fi
 
+      clear_transient_session
       resume_implementer "$ISSUE_PATH" "$CYCLE" "$VERIFY_FEEDBACK"
       ;;
     *)
