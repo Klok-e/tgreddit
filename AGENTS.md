@@ -3,13 +3,16 @@
 ## Project Structure
 
 - `src/main.rs`: application startup, database migrations, signal handling, and subscription polling.
+- `src/lib.rs`: public library surface used by the binary and integration tests.
 - `src/bot.rs`: Telegram command handling, callbacks, authorization, and repost commands.
 - `src/reddit/`: Reddit API client plus response and domain-adjacent data types.
 - `src/db.rs`: SQLite schema migrations and persistence helpers. Append new migrations instead of editing old ones.
 - `src/handle_post.rs`: dispatches Reddit posts to the correct Telegram delivery path.
 - `src/messages.rs`: Telegram message, caption, and button formatting.
 - `src/download.rs` and `src/ytdlp.rs`: media download helpers and `yt-dlp` integration.
+- `tests/telegram_e2e.rs`: ignored live Telegram integration tests.
 - `config.example.toml`: documented runtime configuration template.
+- `telegram-e2e.example.toml`: documented local template for live Telegram integration tests.
 
 ## Commands
 
@@ -18,6 +21,7 @@
 - `cargo fmt`: format Rust code after changes.
 - `cargo clippy`: lint Rust code after changes.
 - `cargo test`: run unit tests after changes.
+- `CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture`: run ignored live Telegram integration tests when the change needs real delivery validation.
 
 Runtime video support requires `yt-dlp`; `ffmpeg` should be available for reliable media handling.
 
@@ -27,6 +31,7 @@ Runtime video support requires `yt-dlp`; `ffmpeg` should be available for reliab
 - Run `cargo fmt`.
 - Run `cargo clippy`.
 - Run `cargo test`.
+- Run ignored integration tests only when the issue explicitly needs live Reddit/Telegram delivery validation or the implementation changes Telegram delivery behavior.
 
 ## Coding Style
 
@@ -40,11 +45,13 @@ Tests use Rust's built-in test framework and are colocated with the modules they
 
 Keep unit tests deterministic. Do not make normal tests depend on live Reddit or Telegram APIs unless they are explicitly introduced as integration tests.
 
+Live Telegram integration tests are ignored by default. They require local `tgreddit.toml` for bot configuration and local `telegram-e2e.toml` for the test chat id. These tests send real messages to the configured Telegram channel and intentionally do not delete them.
+
 ## Configuration & Secrets
 
 Local runs require `CONFIG_PATH` to point at a TOML config. Use `config.example.toml` as the template for available keys and defaults.
 
-Do not commit real Telegram bot tokens, production chat IDs, or local SQLite database files. `authorized_users` controls which Telegram users can invoke bot commands.
+Do not commit real Telegram bot tokens, production chat IDs, local Telegram E2E config, or local SQLite database files. `authorized_users` controls which Telegram users can invoke bot commands.
 
 ## Documentation
 
