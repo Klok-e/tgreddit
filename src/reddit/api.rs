@@ -7,15 +7,6 @@ use thiserror::Error;
 use url::Url;
 
 static REDDIT_BASE_URL: &str = "https://www.reddit.com";
-const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-
-fn get_base_url() -> Url {
-    Url::parse(REDDIT_BASE_URL).unwrap()
-}
-
-fn create_client() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().user_agent(USER_AGENT)
-}
 
 static TRANSPORT: OnceLock<RedditOAuthTransport> = OnceLock::new();
 
@@ -87,29 +78,63 @@ pub(crate) async fn get_link_via(transport: &RedditOAuthTransport, link_id: &str
 pub enum SubredditAboutError {
     #[error("no such subreddit")]
     NoSuchSubreddit,
+    #[error("subreddit is inaccessible: {reason}")]
+    Inaccessible { reason: String },
+    #[error("failed to parse subreddit about response")]
+    Parse(#[from] serde_json::Error),
     #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
-    #[error(transparent)]
-    UrlParseError(#[from] url::ParseError),
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    Transport(anyhow::Error),
 }
 
 pub async fn get_subreddit_about(subreddit: &str) -> Result<SubredditAbout, SubredditAboutError> {
     info!("getting subreddit about for /r/{subreddit}");
-    let client = create_client()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let url = get_base_url().join(&format!("/r/{subreddit}/about.json"))?;
-    let res = client.get(url).send().await?.error_for_status()?;
+    let transport = get_transport().map_err(SubredditAboutError::Transport)?;
+    let path = format!("/r/{subreddit}/about.json");
+    let query: [(&str, String); 0] = [];
+    let response = transport
+        .send_authenticated(&path, &query)
+        .await
+        .map_err(SubredditAboutError::Transport)?;
+    parse_subreddit_about_response(response.status, &response.body)
+}
 
-    match res.status() {
-        reqwest::StatusCode::FOUND => Err(SubredditAboutError::NoSuchSubreddit),
+/// Parse a Reddit subreddit about response into a `SubredditAbout` or a typed
+/// validation error. This is a pure function so it can be tested with fixture
+/// JSON without making any network requests.
+///
+/// Reddit returns:
+/// - `200 OK` with a `SubredditAboutResponse` body for valid subreddits
+/// - `302 FOUND` (legacy) for nonexistent subreddits that redirect to search
+/// - `404 Not Found` with a structured JSON error for nonexistent subreddits
+/// - `403 Forbidden` with a `reason` field (`private`, `banned`, `gated`,
+///   `quarantined`) for inaccessible subreddits
+/// - Other non-success statuses are treated as inaccessible with the parsed
+///   reason (or `"unknown"` if the body has no `reason` field)
+fn parse_subreddit_about_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<SubredditAbout, SubredditAboutError> {
+    match status {
+        reqwest::StatusCode::OK => {
+            let response: SubredditAboutResponse = serde_json::from_str(body)?;
+            Ok(response.data)
+        }
+        reqwest::StatusCode::FOUND | reqwest::StatusCode::NOT_FOUND => {
+            Err(SubredditAboutError::NoSuchSubreddit)
+        }
         _ => {
-            let data = res.json::<SubredditAboutResponse>().await?.data;
-            Ok(data)
+            let reason = parse_reddit_error_reason(body).unwrap_or_else(|| "unknown".to_string());
+            Err(SubredditAboutError::Inaccessible { reason })
         }
     }
+}
+
+/// Extract the `reason` field from a Reddit JSON error body, if present.
+/// Reddit error bodies look like `{"error": 403, "reason": "banned", "message": "..."}`.
+fn parse_reddit_error_reason(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(str::to_string)))
 }
 
 #[cfg(test)]
@@ -302,5 +327,171 @@ mod tests {
         assert_eq!(post.title, "An image");
         assert_eq!(post.permalink, "/r/pics/comments/img1/an_image/");
         assert_eq!(post.url, "https://i.redd.it/example.jpg");
+    }
+
+    fn valid_about_body() -> &'static str {
+        r#"{
+            "kind": "t5",
+            "data": {
+                "display_name": "rust"
+            }
+        }"#
+    }
+
+    #[test]
+    fn parse_about_response_200_returns_subreddit_about() {
+        let result =
+            parse_subreddit_about_response(reqwest::StatusCode::OK, valid_about_body()).unwrap();
+        assert_eq!(result.display_name, "rust");
+    }
+
+    #[test]
+    fn parse_about_response_302_maps_to_no_such_subreddit() {
+        let err = parse_subreddit_about_response(
+            reqwest::StatusCode::FOUND,
+            r#"{"error": 302, "message": "Found"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SubredditAboutError::NoSuchSubreddit));
+    }
+
+    #[test]
+    fn parse_about_response_404_maps_to_no_such_subreddit() {
+        let err = parse_subreddit_about_response(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error": 404, "message": "Not Found"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SubredditAboutError::NoSuchSubreddit));
+    }
+
+    #[test]
+    fn parse_about_response_403_maps_known_reasons_to_inaccessible() {
+        let cases = [
+            (
+                "private",
+                r#"{"error": 403, "reason": "private", "message": "Forbidden"}"#,
+            ),
+            (
+                "banned",
+                r#"{"error": 403, "reason": "banned", "message": "This community is banned"}"#,
+            ),
+            (
+                "gated",
+                r#"{"error": 403, "reason": "gated", "message": "This community is gated"}"#,
+            ),
+            (
+                "quarantined",
+                r#"{"error": 403, "reason": "quarantined", "message": "This community is quarantined"}"#,
+            ),
+        ];
+        for (expected_reason, body) in cases {
+            let err =
+                parse_subreddit_about_response(reqwest::StatusCode::FORBIDDEN, body).unwrap_err();
+            match err {
+                SubredditAboutError::Inaccessible { reason } => {
+                    assert_eq!(
+                        reason, expected_reason,
+                        "failed for reason={expected_reason}"
+                    );
+                }
+                other => {
+                    panic!("expected Inaccessible for reason={expected_reason}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_about_response_403_without_reason_maps_to_inaccessible_unknown() {
+        let err = parse_subreddit_about_response(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error": 403, "message": "Forbidden"}"#,
+        )
+        .unwrap_err();
+        match err {
+            SubredditAboutError::Inaccessible { reason } => {
+                assert_eq!(reason, "unknown");
+            }
+            other => panic!("expected Inaccessible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_about_response_403_with_non_json_body_maps_to_inaccessible_unknown() {
+        let err = parse_subreddit_about_response(reqwest::StatusCode::FORBIDDEN, "not json at all")
+            .unwrap_err();
+        match err {
+            SubredditAboutError::Inaccessible { reason } => {
+                assert_eq!(reason, "unknown");
+            }
+            other => panic!("expected Inaccessible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_about_response_500_with_reason_maps_to_inaccessible() {
+        let err = parse_subreddit_about_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error": 500, "reason": "server_error", "message": "Internal Server Error"}"#,
+        )
+        .unwrap_err();
+        match err {
+            SubredditAboutError::Inaccessible { reason } => {
+                assert_eq!(reason, "server_error");
+            }
+            other => panic!("expected Inaccessible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_about_response_200_with_invalid_json_returns_parse_error() {
+        let err = parse_subreddit_about_response(reqwest::StatusCode::OK, "this is not valid json")
+            .unwrap_err();
+        assert!(
+            matches!(err, SubredditAboutError::Parse(_)),
+            "expected Parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_about_response_200_with_missing_data_field_returns_parse_error() {
+        // Valid JSON but missing the required `data` field.
+        let err = parse_subreddit_about_response(reqwest::StatusCode::OK, r#"{"kind": "t5"}"#)
+            .unwrap_err();
+        assert!(
+            matches!(err, SubredditAboutError::Parse(_)),
+            "expected Parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reddit_error_reason_extracts_known_reasons() {
+        for reason in ["private", "banned", "gated", "quarantined"] {
+            let body = format!(r#"{{"error": 403, "reason": "{reason}", "message": "x"}}"#);
+            assert_eq!(
+                parse_reddit_error_reason(&body),
+                Some(reason.to_string()),
+                "failed for reason={reason}",
+            );
+        }
+    }
+
+    #[test]
+    fn reddit_error_reason_returns_none_when_missing() {
+        assert_eq!(
+            parse_reddit_error_reason(r#"{"error": 403, "message": "Forbidden"}"#),
+            None
+        );
+        assert_eq!(parse_reddit_error_reason("not json"), None);
+        assert_eq!(parse_reddit_error_reason(""), None);
+    }
+
+    #[test]
+    fn subreddit_about_error_displays_reason() {
+        let err = SubredditAboutError::Inaccessible {
+            reason: "private".to_string(),
+        };
+        assert_eq!(format!("{err}"), "subreddit is inaccessible: private");
     }
 }

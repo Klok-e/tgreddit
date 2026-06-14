@@ -49,6 +49,16 @@ pub struct RedditOAuthTransport {
     token: std::sync::Arc<Mutex<Option<RedditBearerToken>>>,
 }
 
+/// Raw response from an authenticated Reddit API request, with the HTTP
+/// status and the response body as text. Callers use this to map
+/// non-success statuses to typed errors (for example, subreddit about
+/// validation) without going through `get_json`'s `error_for_status` path.
+#[derive(Debug)]
+pub struct RedditRawResponse {
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
 impl RedditOAuthTransport {
     pub fn new() -> Result<Self> {
         Ok(Self {
@@ -83,7 +93,46 @@ impl RedditOAuthTransport {
     where
         T: serde::de::DeserializeOwned,
     {
+        let response = self.send_authenticated(path, query).await?;
+        if !response.status.is_success() {
+            anyhow::bail!(
+                "Reddit API returned non-success status {} for path {}",
+                response.status,
+                path
+            );
+        }
+        serde_json::from_str(&response.body).with_context(|| {
+            format!(
+                "failed to parse Reddit API response for path {path}: {}",
+                response.body
+            )
+        })
+    }
+
+    /// Send an authenticated GET to the OAuth API and return the raw response
+    /// (status + body text) without interpreting it. Callers that need to map
+    /// non-success statuses to typed errors (for example, subreddit about
+    /// validation) use this instead of `get_json`.
+    pub async fn send_authenticated(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<RedditRawResponse> {
         let token = self.bearer_token().await?;
+        let url = self.build_authenticated_url(path, query)?;
+        let mut request = self.client.get(url).headers(self.app_headers()?);
+        request = request.bearer_auth(&token.access_token);
+        for (key, value) in &token.extra_headers {
+            request = request.header(key, value);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        Ok(RedditRawResponse { status, body })
+    }
+
+    fn build_authenticated_url(&self, path: &str, query: &[(&str, String)]) -> Result<Url> {
         let mut url = self.oauth_url(path)?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -92,19 +141,7 @@ impl RedditOAuthTransport {
                 pairs.append_pair(key, value);
             }
         }
-
-        let mut request = self.client.get(url).headers(self.app_headers()?);
-        request = request.bearer_auth(&token.access_token);
-        for (key, value) in &token.extra_headers {
-            request = request.header(key, value);
-        }
-
-        Ok(request
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<T>()
-            .await?)
+        Ok(url)
     }
 
     fn token_url(&self) -> Result<Url> {
@@ -224,5 +261,35 @@ mod tests {
         let url = transport.oauth_url("/r/rust/top.json").unwrap();
 
         assert_eq!(url.as_str(), "https://oauth.reddit.com/r/rust/top.json");
+    }
+
+    #[test]
+    fn build_authenticated_url_appends_raw_json_query_parameter() {
+        let transport = RedditOAuthTransport::new().unwrap();
+
+        let url = transport
+            .build_authenticated_url("/r/rust/about.json", &[])
+            .unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://oauth.reddit.com/r/rust/about.json?raw_json=1"
+        );
+    }
+
+    #[test]
+    fn build_authenticated_url_merges_raw_json_with_caller_query() {
+        let transport = RedditOAuthTransport::new().unwrap();
+
+        let query = [("limit", "5".to_string())];
+        let url = transport
+            .build_authenticated_url("/r/rust/top.json", &query)
+            .unwrap();
+
+        // `raw_json=1` must be present alongside the caller-supplied query.
+        let raw = url.as_str();
+        assert!(raw.starts_with("https://oauth.reddit.com/r/rust/top.json?"));
+        assert!(raw.contains("raw_json=1"), "missing raw_json=1 in {raw}");
+        assert!(raw.contains("limit=5"), "missing limit=5 in {raw}");
     }
 }

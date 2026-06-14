@@ -208,6 +208,17 @@ pub async fn handle_command(
                         tg.send_message(ChatId(chat_id), "No such subreddit")
                             .await?;
                     }
+                    Err(reddit::SubredditAboutError::Inaccessible { reason }) => {
+                        warn!(
+                            "refusing to subscribe to r/{}: inaccessible ({reason})",
+                            args.subreddit
+                        );
+                        tg.send_message(
+                            ChatId(chat_id),
+                            format!("This subreddit is not accessible ({reason})"),
+                        )
+                        .await?;
+                    }
                     Err(err) => {
                         Err(err).context("Couldn't download about.json for subreddit")?;
                     }
