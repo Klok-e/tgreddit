@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Add Live Reddit OAuth Test
 
@@ -23,3 +23,7 @@ Add an ignored live Reddit integration test that validates the OAuth transport a
 ## Blocked by
 
 - .scratch/remove-test-server/issues/01-remove-fake-reddit-server.md
+
+## AFK completed
+
+Added an ignored live Reddit OAuth integration test that fetches a small top listing from r/announcements through the default OAuth transport and asserts the listing has children. Verified fmt, clippy, normal tests, and the explicit live Reddit test.
