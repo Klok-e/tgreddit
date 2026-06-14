@@ -159,6 +159,19 @@ There's a prebuilt Docker image with dependencies included at
 Of course, you may also build your own using from the
 [Dockerfile](https://raw.githubusercontent.com/raine/tgreddit/master/Dockerfile).
 
+## reddit transport
+
+The bot fetches Reddit data through a Redlib-style anonymous OAuth
+transport: it acquires a Reddit bearer token and then calls
+`https://oauth.reddit.com` JSON endpoints with app-like request
+headers. There is no HTML scraping, no public-Redlib-instance
+dependency, and no fallback chain.
+
+See [`docs/runtime/reddit-oauth.md`](docs/runtime/reddit-oauth.md) for
+the transport overview, its fragility and rate-limit risks, and the
+manual smoke checklist for parity with the existing image, hosted
+video, external link, self post, and gallery delivery paths.
+
 ## have an idea, question or a bug report?
 
 Feel free to open an issue or start a new discussion.
