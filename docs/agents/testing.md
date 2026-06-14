@@ -2,29 +2,23 @@
 
 ## Normal Tests
 
-Normal `cargo test` tests must be deterministic and must not depend on live Reddit or Telegram APIs.
+Normal `cargo test` tests must be deterministic and must not depend on live external services.
 
-Unit tests should use pure fixtures, mocked data, and in-process helpers. For Reddit behavior, unit tests should cover:
+Unit tests should use pure fixtures, mocked data, and in-process helpers. For external service-adjacent code, unit tests should cover local behavior.
 
-- JSON deserialization.
-- Post classification.
-- Gallery metadata handling.
-- URL construction.
-- Request/query construction helpers.
+Do not add local HTTP servers that pretend to be external services. This is absolute: external service behavior tests must either be pure unit tests without network I/O or ignored live integration tests against the real service.
 
-Do not add local HTTP servers that pretend to be Reddit. This is absolute: Reddit API behavior tests must either be pure unit tests without network I/O or ignored live integration tests against real Reddit.
+## Live External Service Tests
 
-## Live Reddit Tests
+External service behavior includes any behavior whose correctness depends on a server or service outside this process, including Reddit, Telegram, OAuth endpoints, media hosts, and download-tool interactions with those hosts.
 
-Tests that exercise real Reddit API behavior must live under `tests/` as integration tests and must be ignored by default.
+Tests that exercise real external service behavior must live under `tests/` as integration tests and must be ignored by default.
 
-Live Reddit integration tests should use real Reddit endpoints and may require network access. They are appropriate for changes to:
+Live external service integration tests should use real service endpoints.
 
-- OAuth transport behavior.
-- Feed fetching.
-- Direct post lookup.
-- Subreddit validation.
-- Reddit response compatibility.
+When a change depends on behavior owned by an external service, agents should add or update an ignored live integration test when they can run it locally. If they do not add one, they must explain why in the final response.
+
+If required credentials or config are missing, agents should ask for them when live validation is necessary to prove the change. If the missing live test is not blocking the local implementation, they may continue with deterministic tests but must report the unrun live-validation gap in the final response.
 
 Run them explicitly when present with:
 
@@ -42,7 +36,7 @@ Run them explicitly with:
 CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture
 ```
 
-These tests send real messages to the configured Telegram channel and intentionally do not delete them.
+These tests send real messages to the configured testing Telegram channel.
 
 ## Verification Expectations
 
@@ -54,4 +48,4 @@ cargo clippy
 cargo test
 ```
 
-Run ignored live Reddit or Telegram integration tests only when the change affects that external service behavior.
+Run ignored live integration tests when the change affects external service behavior and the required credentials, config, and network access are available.
