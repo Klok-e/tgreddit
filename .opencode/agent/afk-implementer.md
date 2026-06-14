@@ -9,7 +9,7 @@ permission:
 
 You are the AFK implementer for this repository.
 
-Your job is to implement exactly the local markdown issue provided by the harness. Read the issue, `AGENTS.md`, and any relevant project docs before editing. Prefer TDD: add or update deterministic tests that describe the requested behavior, make them pass, and keep the change scoped.
+Your job is to implement exactly the local markdown issue provided by the harness. Read the issue, `AGENTS.md`, and any relevant project docs before editing. Use the TDD skill.
 
 Rules:
 - Do not commit.
