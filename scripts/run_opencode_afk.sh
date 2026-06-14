@@ -8,14 +8,19 @@ VERIFIER_MODEL="openai/gpt-5.5"
 SBX_PROFILE="${SBX_PROFILE:-opencode-tgreddit}"
 
 usage() {
-  echo "Usage: scripts/run_opencode_afk.sh [--prd <feature-slug|path-to-PRD.md>]" >&2
+  echo "Usage: scripts/run_opencode_afk.sh [--all | --prd <feature-slug|path-to-PRD.md>]" >&2
 }
 
 parse_args() {
   REQUESTED_PRD=""
+  RUN_ALL=0
 
   while (($# > 0)); do
     case "$1" in
+      --all)
+        RUN_ALL=1
+        shift
+        ;;
       --prd)
         if (($# < 2)) || [[ -z "$2" ]]; then
           usage
@@ -34,6 +39,12 @@ parse_args() {
         ;;
     esac
   done
+
+  if ((RUN_ALL)) && [[ -n "$REQUESTED_PRD" ]]; then
+    echo "--all cannot be combined with --prd." >&2
+    usage
+    exit 2
+  fi
 }
 
 require_cmd() {
@@ -311,6 +322,25 @@ first_runnable_issue_in_feature() {
     done
 }
 
+first_runnable_issue_across_prds() {
+  local -a prds
+  local prd
+  local issue
+
+  if [[ ! -d .scratch ]]; then
+    return 0
+  fi
+
+  mapfile -t prds < <(find .scratch -mindepth 2 -maxdepth 2 -name 'PRD.md' -type f 2>/dev/null | sort)
+  for prd in "${prds[@]}"; do
+    issue="$(first_runnable_issue_in_feature "$(feature_dir_for_prd "$prd")" || true)"
+    if [[ -n "$issue" ]]; then
+      printf '%s\n' "$issue"
+      return 0
+    fi
+  done
+}
+
 feature_dir_for_issue() {
   local issue="$1"
 
@@ -366,36 +396,81 @@ resolve_prd() {
 
 select_prd() {
   local -a prds
-  local choice
-  local i
+  local prd
+
+  if [[ ! -d .scratch ]]; then
+    return 0
+  fi
 
   mapfile -t prds < <(find .scratch -mindepth 2 -maxdepth 2 -name 'PRD.md' -type f 2>/dev/null | sort)
-  if ((${#prds[@]} == 0)); then
-    echo "No PRDs found under .scratch/*/PRD.md" >&2
-    exit 1
-  fi
-  if [[ ! -t 0 ]]; then
-    echo "No PRD selected and stdin is not interactive. Pass --prd <feature-slug|path-to-PRD.md>." >&2
-    exit 1
-  fi
-
-  echo "Select PRD to work on:" >&2
-  for i in "${!prds[@]}"; do
-    printf '%d) %s\n' "$((i + 1))" "${prds[$i]}" >&2
-  done
-
-  while true; do
-    printf 'PRD number: ' >&2
-    if ! IFS= read -r choice; then
-      echo "No PRD selected." >&2
-      exit 1
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#prds[@]})); then
-      printf '%s\n' "${prds[$((choice - 1))]}"
+  for prd in "${prds[@]}"; do
+    if [[ -n "$(first_runnable_issue_in_feature "$(feature_dir_for_prd "$prd")" || true)" ]]; then
+      printf '%s\n' "$prd"
       return 0
     fi
-    echo "Invalid PRD selection: $choice" >&2
   done
+}
+
+start_issue() {
+  local issue="$1"
+
+  ISSUE_PATH="$issue"
+  ISSUE_TITLE="$(issue_title "$ISSUE_PATH")"
+  IMPLEMENTER_TITLE="$(implementer_title "$ISSUE_PATH")"
+  STATE_PATH="$(state_path_for_issue "$ISSUE_PATH")"
+  STATE_PHASE="initial_implement"
+  CYCLE=1
+  SAVED_FEEDBACK=""
+  IMPLEMENTER_SESSION_ID=""
+  SESSION_PHASE=""
+  SESSION_ID=""
+  VERIFY_STATUS=""
+  VERIFY_SUMMARY=""
+  VERIFY_FEEDBACK=""
+  VERIFY_COMMANDS=""
+  VERIFY_COMMIT=""
+  echo "Selected issue: $ISSUE_PATH"
+}
+
+start_next_afkable_issue() {
+  local issue
+
+  : > "$SKIP_REASONS"
+  issue="$(first_runnable_issue_across_prds || true)"
+  if [[ -n "$issue" ]]; then
+    start_issue "$issue"
+    return 0
+  fi
+
+  echo "No AFKable issues found."
+  if [[ -s "$SKIP_REASONS" ]]; then
+    echo >&2
+    while IFS= read -r line; do
+      echo "$line" >&2
+    done < "$SKIP_REASONS"
+  fi
+  return 1
+}
+
+start_next_issue_in_feature() {
+  local feature_dir="$1"
+  local issue
+
+  : > "$SKIP_REASONS"
+  issue="$(first_runnable_issue_in_feature "$feature_dir" || true)"
+  if [[ -n "$issue" ]]; then
+    start_issue "$issue"
+    return 0
+  fi
+
+  echo "No AFKable issues found."
+  if [[ -s "$SKIP_REASONS" ]]; then
+    echo >&2
+    while IFS= read -r line; do
+      echo "$line" >&2
+    done < "$SKIP_REASONS"
+  fi
+  return 1
 }
 
 issue_title() {
@@ -933,8 +1008,6 @@ PROMPT
 REQUESTED_PRD=""
 parse_args "$@"
 
-require_cmd sbx
-require_cmd git
 require_cmd jq
 
 TMPDIR="$(mktemp -d)"
@@ -1006,8 +1079,6 @@ VERIFY_COMMIT=""
 SELECTED_PRD=""
 SELECTED_FEATURE_DIR=""
 
-run_preflight
-
 EXISTING_STATE="$(active_state_file)"
 if [[ -n "$EXISTING_STATE" ]]; then
   load_state "$EXISTING_STATE"
@@ -1023,32 +1094,34 @@ if [[ -n "$EXISTING_STATE" ]]; then
   echo "Resuming issue: $ISSUE_PATH"
   echo "AFK state: $STATE_PATH"
 else
-  if [[ -n "$REQUESTED_PRD" ]]; then
+  if ((RUN_ALL)); then
+    if ! start_next_afkable_issue; then
+      exit 0
+    fi
+  elif [[ -n "$REQUESTED_PRD" ]]; then
     SELECTED_PRD="$(resolve_prd "$REQUESTED_PRD")"
+    SELECTED_FEATURE_DIR="$(feature_dir_for_prd "$SELECTED_PRD")"
+    echo "Selected PRD: $SELECTED_PRD"
+    if ! start_next_issue_in_feature "$SELECTED_FEATURE_DIR"; then
+      exit 0
+    fi
   else
     SELECTED_PRD="$(select_prd)"
-  fi
-  SELECTED_FEATURE_DIR="$(feature_dir_for_prd "$SELECTED_PRD")"
-  echo "Selected PRD: $SELECTED_PRD"
-
-  ISSUE_PATH="$(first_runnable_issue_in_feature "$SELECTED_FEATURE_DIR" || true)"
-  if [[ -z "$ISSUE_PATH" ]]; then
-    echo "No runnable ready-for-agent issues found under $SELECTED_FEATURE_DIR/issues/*.md" >&2
-    if [[ -s "$SKIP_REASONS" ]]; then
-      echo >&2
-      while IFS= read -r line; do
-        echo "$line" >&2
-      done < "$SKIP_REASONS"
+    if [[ -z "$SELECTED_PRD" ]]; then
+      echo "No AFKable issues found."
+      exit 0
     fi
-    exit 1
+    SELECTED_FEATURE_DIR="$(feature_dir_for_prd "$SELECTED_PRD")"
+    echo "Selected PRD: $SELECTED_PRD"
+    if ! start_next_issue_in_feature "$SELECTED_FEATURE_DIR"; then
+      exit 0
+    fi
   fi
-
-  ISSUE_TITLE="$(issue_title "$ISSUE_PATH")"
-  IMPLEMENTER_TITLE="$(implementer_title "$ISSUE_PATH")"
-  STATE_PATH="$(state_path_for_issue "$ISSUE_PATH")"
-  STATE_PHASE="initial_implement"
-  echo "Selected issue: $ISSUE_PATH"
 fi
+
+require_cmd sbx
+require_cmd git
+run_preflight
 
 while true; do
   case "$STATE_PHASE" in
@@ -1080,6 +1153,12 @@ while true; do
         echo "Completed issue: $ISSUE_PATH"
         if [[ -n "$VERIFY_COMMIT" && "$VERIFY_COMMIT" != "null" ]]; then
           echo "Commit: $VERIFY_COMMIT"
+        fi
+        if ((RUN_ALL)); then
+          if ! start_next_afkable_issue; then
+            exit 0
+          fi
+          continue
         fi
         exit 0
       fi
