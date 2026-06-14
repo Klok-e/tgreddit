@@ -94,7 +94,7 @@ pub async fn get_subreddit_about(subreddit: &str) -> Result<SubredditAbout, Subr
     let response = transport
         .send_authenticated(&path, &query)
         .await
-        .map_err(SubredditAboutError::Transport)?;
+        .map_err(|e| SubredditAboutError::Transport(anyhow::Error::from(e)))?;
     parse_subreddit_about_response(response.status, &response.body)
 }
 

@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Refresh And Rate Limit Basics
 
@@ -25,3 +25,7 @@ Add minimal production hardening for the OAuth transport: refresh the token befo
 - .scratch/reddit-html-scraping/issues/02-feed-delivery-via-oauth.md
 - .scratch/reddit-html-scraping/issues/03-direct-post-lookup-via-oauth.md
 - .scratch/reddit-html-scraping/issues/04-subreddit-validation-via-oauth.md
+
+## Comments
+
+AFK completed: Added OAuth token refresh hardening, one-shot 401 refresh/retry behavior, actionable rate-limit errors, and deterministic refresh/rate-limit tests without live Reddit.

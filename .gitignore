@@ -3,3 +3,4 @@
 /telegram-e2e.toml
 /.scratch/*/.afk-state.json
 skills-lock.json
+.claude/settings.local.json
