@@ -237,6 +237,8 @@ run_preflight() {
     ffmpeg -version >/dev/null
     test -f tgreddit.toml
     test -f telegram-e2e.toml
+
+    opencode plugin @tarquinen/opencode-dcp@latest --global
   '
 }
 
