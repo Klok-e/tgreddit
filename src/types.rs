@@ -28,7 +28,7 @@ impl Recordable for Video {
     }
 
     fn subreddit(&self) -> &str {
-        "youtube download"
+        "video download"
     }
 }
 

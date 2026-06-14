@@ -78,11 +78,29 @@ pub fn download(url: &str) -> Result<Video> {
     Ok(video)
 }
 
-/// Get the path to the video file in a directory.
+/// Pick the path of the yt-dlp output file in `dir`.
+///
+/// When yt-dlp writes more than one file, this selects the file with the
+/// oldest modification timestamp; if timestamps are equal or unavailable,
+/// paths are used as a deterministic tiebreaker.
 fn get_video_path(dir: &Path) -> Result<PathBuf> {
-    let mut entries = fs::read_dir(dir).context("Could not read files in temp dir")?;
-    let video_entry = entries.next().context("No video file in temp dir")?;
-    Ok(video_entry?.path())
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .context("Could not read files in temp dir")?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Sort by (modified time, path) so the oldest modified file wins and ties
+    // resolve to a deterministic ordering independent of the filesystem.
+    entries.sort_by(|a, b| {
+        let ma = fs::metadata(a).and_then(|m| m.modified()).ok();
+        let mb = fs::metadata(b).and_then(|m| m.modified()).ok();
+        ma.cmp(&mb).then_with(|| a.cmp(b))
+    });
+
+    entries
+        .into_iter()
+        .next()
+        .context("No video file in temp dir")
 }
 
 fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
@@ -108,8 +126,74 @@ fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_metadata_from_path;
+    use super::{get_video_path, parse_metadata_from_path};
+    use std::fs::File;
     use std::path::Path;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn write_empty_file(path: &Path) {
+        File::create(path).expect("create empty test file");
+    }
+
+    fn set_mtime(path: &Path, mtime: SystemTime) {
+        let file = File::options()
+            .write(true)
+            .open(path)
+            .expect("open for mtime set");
+        file.set_modified(mtime).expect("set modified time");
+    }
+
+    #[test]
+    fn test_get_video_path_returns_only_file() {
+        let dir = TempDir::new().expect("create tempdir");
+        let only = dir.path().join("only.mp4");
+        write_empty_file(&only);
+        assert_eq!(get_video_path(dir.path()).unwrap(), only);
+    }
+
+    #[test]
+    fn test_get_video_path_picks_oldest_modified_file() {
+        let dir = TempDir::new().expect("create tempdir");
+        let newer = dir.path().join("newer.mp4");
+        let oldest = dir.path().join("oldest.mp4");
+        let middle = dir.path().join("middle.mp4");
+        write_empty_file(&newer);
+        write_empty_file(&middle);
+        write_empty_file(&oldest);
+        // Use distinct mtimes so the test cannot rely on creation order.
+        let base = SystemTime::now();
+        set_mtime(&newer, base + Duration::from_secs(30));
+        set_mtime(&middle, base + Duration::from_secs(15));
+        set_mtime(&oldest, base);
+        assert_eq!(get_video_path(dir.path()).unwrap(), oldest);
+    }
+
+    #[test]
+    fn test_get_video_path_falls_back_to_path_order_when_timestamps_tie() {
+        let dir = TempDir::new().expect("create tempdir");
+        let alpha = dir.path().join("alpha.mp4");
+        let bravo = dir.path().join("bravo.mp4");
+        let charlie = dir.path().join("charlie.mp4");
+        write_empty_file(&alpha);
+        write_empty_file(&bravo);
+        write_empty_file(&charlie);
+        // All files share the same mtime.
+        let mtime = SystemTime::now();
+        set_mtime(&alpha, mtime);
+        set_mtime(&bravo, mtime);
+        set_mtime(&charlie, mtime);
+        // With equal mtimes, deterministic path ordering picks the
+        // alphabetically first path.
+        assert_eq!(get_video_path(dir.path()).unwrap(), alpha);
+    }
+
+    #[test]
+    fn test_get_video_path_errors_on_empty_directory() {
+        let dir = TempDir::new().expect("create tempdir");
+        let result = get_video_path(dir.path());
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_parse_metadata_from_path() {

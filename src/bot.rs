@@ -137,15 +137,14 @@ pub async fn handle_no_command(
     async fn handle(message: &Message, tg: &Arc<Bot>, config: &Arc<config::Config>) -> Result<()> {
         lazy_static! {
             static ref RE_REDDIT: Regex = Regex::new(r"comments/(\w+)").unwrap();
-            static ref RE_YOUTUBE: Regex =
-                Regex::new(r"(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)").unwrap();
         }
 
         let text = message.text().context("No text in message")?;
 
         let db = db::Database::open(config)?;
-        // Check if the text matches the YouTube regex
-        if RE_YOUTUBE.is_match(text) {
+        if let Some(link) = parse_twitter_status_url(text) {
+            handle_video_link(&db, tg, message.chat.id.0, &link).await?;
+        } else if is_youtube_url(text) {
             let link = Url::parse(text)?;
             handle_video_link(&db, tg, message.chat.id.0, &link).await?;
         } else {
@@ -466,9 +465,118 @@ async fn callback_handler(
     Ok(())
 }
 
+/// Return the first http(s) URL in `text` if it points at a Twitter/X
+/// status page (i.e. `/{user}/status/{id}` on `twitter.com`,
+/// `mobile.twitter.com`, or `x.com`).
+fn parse_twitter_status_url(text: &str) -> Option<Url> {
+    let token = text
+        .split_whitespace()
+        .find(|tok| tok.starts_with("http://") || tok.starts_with("https://"))?;
+    let url = Url::parse(token).ok()?;
+
+    let host = url.host_str()?;
+    if !matches!(host, "twitter.com" | "mobile.twitter.com" | "x.com") {
+        return None;
+    }
+
+    let mut segments = url.path_segments()?.filter(|s| !s.is_empty());
+    let _user = segments.next()?;
+    let marker = segments.next()?;
+    let _id = segments.next()?;
+    if segments.next().is_some() || marker != "status" {
+        return None;
+    }
+    Some(url)
+}
+
+/// Return true if `text` contains a YouTube watch or youtu.be share link.
+fn is_youtube_url(text: &str) -> bool {
+    lazy_static! {
+        static ref RE_YOUTUBE: Regex =
+            Regex::new(r"(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)").unwrap();
+    }
+    RE_YOUTUBE.is_match(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_twitter_status_url_accepts_twitter_status() {
+        let url = parse_twitter_status_url("https://twitter.com/someuser/status/1234567890")
+            .expect("twitter.com status URL should be accepted");
+        assert_eq!(url.host_str(), Some("twitter.com"));
+        assert_eq!(url.path(), "/someuser/status/1234567890");
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_accepts_mobile_twitter_status() {
+        let url = parse_twitter_status_url("https://mobile.twitter.com/someuser/status/1234567890")
+            .expect("mobile.twitter.com status URL should be accepted");
+        assert_eq!(url.host_str(), Some("mobile.twitter.com"));
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_accepts_x_status() {
+        let url = parse_twitter_status_url("https://x.com/someuser/status/1234567890")
+            .expect("x.com status URL should be accepted");
+        assert_eq!(url.host_str(), Some("x.com"));
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_twitter_profile() {
+        assert!(parse_twitter_status_url("https://twitter.com/someuser").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_twitter_search() {
+        assert!(parse_twitter_status_url("https://twitter.com/search?q=hello").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_twitter_home() {
+        assert!(parse_twitter_status_url("https://twitter.com/").is_none());
+        assert!(parse_twitter_status_url("https://twitter.com").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_unrelated_hosts() {
+        assert!(parse_twitter_status_url("https://example.com/foo/status/1").is_none());
+        assert!(parse_twitter_status_url("https://x.com.evil.example/foo").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_status_with_extra_path() {
+        assert!(parse_twitter_status_url("https://twitter.com/user/status/123/photo/1").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_rejects_status_with_empty_id() {
+        assert!(parse_twitter_status_url("https://twitter.com/user/status/").is_none());
+    }
+
+    #[test]
+    fn test_parse_twitter_status_url_ignores_non_url_text() {
+        assert!(parse_twitter_status_url("just some text").is_none());
+        assert!(parse_twitter_status_url("twitter.com/user/status/1").is_none());
+    }
+
+    #[test]
+    fn test_is_youtube_url_accepts_youtube_watch_url() {
+        assert!(is_youtube_url(
+            "https://www.youtube.com/watch?v=abc123def45"
+        ));
+        assert!(is_youtube_url("https://youtube.com/watch?v=abc123def45"));
+        assert!(is_youtube_url("https://youtu.be/abc123def45"));
+    }
+
+    #[test]
+    fn test_is_youtube_url_rejects_unrelated_text() {
+        assert!(!is_youtube_url("https://twitter.com/user/status/1"));
+        assert!(!is_youtube_url("https://example.com/watch?v=abc"));
+        assert!(!is_youtube_url("just some text"));
+    }
 
     #[test]
     fn test_parse_subscribe_message_only_subreddit() {
