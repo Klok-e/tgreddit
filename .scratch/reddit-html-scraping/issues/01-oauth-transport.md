@@ -29,3 +29,7 @@ None - can start immediately
 ### AFK completed
 
 OAuth transport slice meets issue acceptance criteria; validation passed; scope limited to src/reddit/oauth.rs test-harness change in current worktree.
+
+### Correction note
+
+The `test-harness change` referenced in the original completion note introduced a local HTTP server that pretended to be Reddit for the OAuth transport test. That approach violated the active testing policy in `docs/agents/testing.md`, which forbids local HTTP servers that simulate Reddit in normal tests. The fake Reddit test server has since been removed (see `.scratch/remove-test-server/issues/01-remove-fake-reddit-server.md`), and OAuth transport coverage is now split between pure deterministic seams (token response parsing, default URL construction) and an ignored live Reddit integration test (see `.scratch/remove-test-server/issues/02-add-live-reddit-oauth-test.md`). The historical completion note above is preserved as-is so the change history is not rewritten as if the violation never happened.

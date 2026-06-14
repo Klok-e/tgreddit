@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Align Scratch OAuth Testing Docs
 
@@ -22,3 +22,9 @@ Update the historical Reddit OAuth scratch planning docs so their testing expect
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+### AFK completed
+
+Aligned the historical Reddit OAuth scratch PRD with the active testing policy and added a correction note to the completed OAuth transport issue while preserving its original completion history.

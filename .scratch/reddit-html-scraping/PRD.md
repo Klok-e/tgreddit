@@ -54,8 +54,10 @@ Keep the existing Reddit JSON data model and Telegram delivery behavior. The sou
 ## Testing Decisions
 
 - Good tests verify behavior at stable seams: token response parsing, token refresh decision logic, endpoint construction, auth header injection, rate-limit parsing, and Reddit error mapping.
-- Normal tests must not depend on live Reddit, Telegram, or remote media hosts.
-- Use mocked HTTP responses or small local fixtures for OAuth token responses, listing responses, direct post responses, about responses, and error responses.
+- Normal tests must be pure and deterministic. They must not depend on live Reddit, Telegram, or remote media hosts, and they must not use local HTTP servers that pretend to be Reddit.
+- Normal Reddit tests must use pure fixtures or in-process helpers without network I/O (for example, token response parsing, URL construction, request/query construction helpers, Reddit JSON fixture deserialization, post classification, gallery metadata handling, and error mapping).
+- Reddit API behavior that requires real network semantics belongs in ignored live Reddit integration tests under `tests/`, not in the normal test suite.
+- Run ignored live Reddit integration tests explicitly with `cargo test --test reddit_live -- --ignored --nocapture`.
 - Existing tests for command parsing, database behavior, message formatting, Reddit post classification, and yt-dlp parsing should remain valid.
 - Add fixture coverage proving existing `Post` deserialization still supports image, hosted video, external link, self, and gallery JSON returned through OAuth.
 - Add tests that bearer tokens are never included in formatted logs/errors if logging helpers are introduced.
