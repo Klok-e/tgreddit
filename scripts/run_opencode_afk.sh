@@ -4,7 +4,8 @@ set -euo pipefail
 MAX_CYCLES=5
 IMPLEMENTER_MODEL="opencode-go/minimax-m3"
 QUALITY_MODEL="opencode-go/minimax-m3"
-VERIFIER_MODEL="openai/gpt-5.5"
+#VERIFIER_MODEL="openai/gpt-5.5"
+VERIFIER_MODEL="opencode-go/minimax-m3"
 SBX_PROFILE="${SBX_PROFILE:-opencode-tgreddit}"
 
 usage() {
