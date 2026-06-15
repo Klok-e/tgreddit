@@ -47,7 +47,8 @@ async fn main() -> Result<()> {
             let db = db::Database::open(&config)?;
             let chat_id = chat_id.parse().unwrap();
             db.record_post(chat_id, &post, None)?;
-            return handle_new_post(&config, &bot.tg, chat_id, &post).await;
+            handle_new_post(&config, &bot.tg, chat_id, &post).await?;
+            return Ok(());
         }
         return Ok(());
     }

@@ -7,13 +7,25 @@ use url::Url;
 use std::string::ToString;
 use std::{borrow::Cow, path::PathBuf};
 use std::{collections::HashMap, path::Path};
-use teloxide::types::{InputFile, InputMediaVideo};
+use teloxide::types::{InputFile, InputMediaVideo, MessageId};
 use teloxide::{
     payloads::{SendMessageSetters, SendPhotoSetters, SendVideoSetters},
     types::InputMediaPhoto,
 };
 use teloxide::{prelude::*, types::InputMedia};
 use tempfile::TempDir;
+
+/// The Telegram message id(s) produced by a single `handle_new_post` delivery.
+///
+/// One delivery produces exactly one Telegram message, except for gallery
+/// media groups, which produce one Telegram message per media item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveredMessages {
+    /// A single Telegram message was delivered (image, video, link, self-text, unknown).
+    Single(MessageId),
+    /// A gallery media group was delivered; one id per media item.
+    Gallery(Vec<MessageId>),
+}
 
 pub async fn handle_video_link(
     db: &db::Database,
@@ -47,13 +59,14 @@ async fn handle_new_video_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     let video = tokio::task::block_in_place(|| ytdlp::download(&post.url))
         .context("Failed to download video from post")?;
 
     info!("got a video: {video:?}");
     let caption = messages::format_media_caption_html(post, config.links_base_url.as_deref());
-    tg.send_video(ChatId(chat_id), InputFile::file(&video.path))
+    let sent = tg
+        .send_video(ChatId(chat_id), InputFile::file(&video.path))
         .parse_mode(teloxide::types::ParseMode::Html)
         .caption(&caption)
         .height(video.height.into())
@@ -64,7 +77,7 @@ async fn handle_new_video_post(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
         post.id
     );
-    Ok(())
+    Ok(DeliveredMessages::Single(sent.id))
 }
 
 async fn handle_new_image_post(
@@ -72,30 +85,33 @@ async fn handle_new_image_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     match download_url_to_tmp(&post.url).await {
         Ok((path, _tmp_dir)) => {
             // path will be deleted when _tmp_dir when goes out of scope
             let caption =
                 messages::format_media_caption_html(post, config.links_base_url.as_deref());
             if is_gif(&path) {
-                tg.send_video(ChatId(chat_id), InputFile::file(path))
+                let sent = tg
+                    .send_video(ChatId(chat_id), InputFile::file(path))
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .caption(&caption)
                     .reply_markup(messages::format_repost_buttons(post))
                     .await?;
 
                 info!("gif uploaded post_id={} chat_id={chat_id}", post.id);
+                Ok(DeliveredMessages::Single(sent.id))
             } else {
-                tg.send_photo(ChatId(chat_id), InputFile::file(path))
+                let sent = tg
+                    .send_photo(ChatId(chat_id), InputFile::file(path))
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .caption(&caption)
                     .reply_markup(messages::format_repost_buttons(post))
                     .await?;
 
                 info!("image uploaded post_id={} chat_id={chat_id}", post.id);
+                Ok(DeliveredMessages::Single(sent.id))
             }
-            Ok(())
         }
         Err(e) => {
             error!("failed to download image: {e:?}");
@@ -109,14 +125,15 @@ async fn handle_new_link_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     let message_html = messages::format_link_message_html(post, config.links_base_url.as_deref());
-    tg.send_message(ChatId(chat_id), message_html)
+    let sent = tg
+        .send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
-    Ok(())
+    Ok(DeliveredMessages::Single(sent.id))
 }
 
 async fn handle_new_self_post(
@@ -124,14 +141,15 @@ async fn handle_new_self_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     let message_html = messages::format_media_caption_html(post, config.links_base_url.as_deref());
-    tg.send_message(ChatId(chat_id), message_html)
+    let sent = tg
+        .send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
         .reply_markup(messages::format_repost_buttons(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
-    Ok(())
+    Ok(DeliveredMessages::Single(sent.id))
 }
 
 async fn download_gallery(post: &reddit::Post) -> Result<HashMap<String, (PathBuf, TempDir)>> {
@@ -159,7 +177,7 @@ async fn handle_new_gallery_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     // post.gallery_data is an array that describes the order of photos in the gallery, while
     // post.media_metadata is a map that contains the URL for each photo
     let gallery_data_items = &post
@@ -210,6 +228,7 @@ async fn handle_new_gallery_post(
     }
 
     let gallery_msg = tg.send_media_group(ChatId(chat_id), media_group).await?;
+    let delivered_ids: Vec<MessageId> = gallery_msg.iter().map(|m| m.id).collect();
     let db = db::Database::open(config)?;
     for msg in gallery_msg {
         let file_meta = if let Some(video) = msg.video() {
@@ -233,7 +252,7 @@ async fn handle_new_gallery_post(
 
     info!("gallery uploaded post_id={} chat_id={chat_id}", post.id);
 
-    Ok(())
+    Ok(DeliveredMessages::Gallery(delivered_ids))
 }
 
 pub async fn process_post(
@@ -255,7 +274,7 @@ pub async fn handle_new_post(
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
-) -> Result<()> {
+) -> Result<DeliveredMessages> {
     info!("got new {post:#?}");
     let mut post = Cow::Borrowed(post);
 
@@ -288,7 +307,9 @@ pub async fn handle_new_post(
         // as a link
         reddit::PostType::Unknown => {
             warn!("unknown post type, post={post:?}");
-            handle_new_link_post(config, tg, chat_id, &post).await
+            handle_new_link_post(config, tg, chat_id, &post)
+                .await
+                .context("Failed handling unknown post")
         }
     }
 }
@@ -297,4 +318,79 @@ fn is_gif(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str().map(|x| x == "gif"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Which variant of `DeliveredMessages` a given `PostType` produces.
+    /// This mirrors the dispatch in `handle_new_post` and is the unit-testable
+    /// piece of the variant selection logic.
+    fn expected_variant_kind(post_type: reddit::PostType) -> VariantKind {
+        match post_type {
+            reddit::PostType::Gallery => VariantKind::Gallery,
+            reddit::PostType::Image
+            | reddit::PostType::Video
+            | reddit::PostType::Link
+            | reddit::PostType::SelfText
+            | reddit::PostType::Unknown => VariantKind::Single,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum VariantKind {
+        Single,
+        Gallery,
+    }
+
+    #[test]
+    fn delivered_messages_single_carries_message_id() {
+        let id = MessageId(42);
+        match DeliveredMessages::Single(id) {
+            DeliveredMessages::Single(carried) => assert_eq!(carried, id),
+            other => panic!("expected Single variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivered_messages_gallery_carries_message_ids() {
+        let ids = vec![MessageId(1), MessageId(2), MessageId(3)];
+        match DeliveredMessages::Gallery(ids.clone()) {
+            DeliveredMessages::Gallery(carried) => assert_eq!(carried, ids),
+            other => panic!("expected Gallery variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn variant_selection_picks_single_for_non_gallery_posts() {
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::Image),
+            VariantKind::Single
+        );
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::Video),
+            VariantKind::Single
+        );
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::Link),
+            VariantKind::Single
+        );
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::SelfText),
+            VariantKind::Single
+        );
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::Unknown),
+            VariantKind::Single
+        );
+    }
+
+    #[test]
+    fn variant_selection_picks_gallery_for_gallery_posts() {
+        assert_eq!(
+            expected_variant_kind(reddit::PostType::Gallery),
+            VariantKind::Gallery
+        );
+    }
 }

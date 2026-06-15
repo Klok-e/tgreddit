@@ -89,7 +89,8 @@ async fn send_case(test_case: TestCase) -> Result<()> {
     }
 
     let tg = Bot::new(app_config.telegram_bot_token.expose_secret());
-    handle_post::handle_new_post(&app_config, &tg, e2e_config.chat_id, &post).await
+    handle_post::handle_new_post(&app_config, &tg, e2e_config.chat_id, &post).await?;
+    Ok(())
 }
 
 fn read_app_config() -> Result<Config> {

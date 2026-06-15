@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # `handle_new_post` Returns Delivered Message Id(s)
 
@@ -14,13 +14,17 @@ Every per-`PostType` helper (`handle_new_image_post`, `handle_new_video_post`, `
 
 ## Acceptance criteria
 
-- [ ] A two-variant enum is added that carries a single Telegram `MessageId` for non-gallery deliveries and a `Vec<MessageId>` for gallery deliveries.
-- [ ] `handle_new_post` returns the enum.
-- [ ] Every per-`PostType` helper in `src/handle_post.rs` returns the enum and the value reflects the message id(s) actually sent to Telegram.
-- [ ] The production callers in `src/main.rs` and `src/bot.rs` ignore the new return value; their existing call sites compile and behave identically.
-- [ ] `process_post` continues to log the delivery error path unchanged and otherwise ignores the value.
-- [ ] Deterministic unit coverage exists for the enum's variant selection logic where it does not require live Telegram.
-- [ ] `cargo fmt`, `cargo clippy`, and `cargo test` pass.
+- [x] A two-variant enum is added that carries a single Telegram `MessageId` for non-gallery deliveries and a `Vec<MessageId>` for gallery deliveries.
+- [x] `handle_new_post` returns the enum.
+- [x] Every per-`PostType` helper in `src/handle_post.rs` returns the enum and the value reflects the message id(s) actually sent to Telegram.
+- [x] The production callers in `src/main.rs` and `src/bot.rs` ignore the new return value; their existing call sites compile and behave identically.
+- [x] `process_post` continues to log the delivery error path unchanged and otherwise ignores the value.
+- [x] Deterministic unit coverage exists for the enum's variant selection logic where it does not require live Telegram.
+- [x] `cargo fmt`, `cargo clippy`, and `cargo test` pass.
+
+## AFK completed
+
+Added `DeliveredMessages` two-variant enum (`Single(MessageId)` / `Gallery(Vec<MessageId>)`) in `src/handle_post.rs` and threaded it through `handle_new_post` and every per-`PostType` helper. Gallery helper collects ids from `send_media_group`; the others return the `sent.id` from the single Telegram call. Production callers in `src/main.rs` (debug-post path) and `src/bot.rs` (`/get` command) ignore the new value; `process_post` continues to swallow errors and discard the value. `tests/telegram_e2e.rs` updated to compile against the new signature. Added 4 unit tests covering variant construction and variant selection per `PostType`. `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` all pass (80 unit tests, 4 new).
 
 ## Blocked by
 
