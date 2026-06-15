@@ -1,6 +1,6 @@
 use crate::{
     config, db,
-    handle_post::{handle_new_post, handle_video_link, process_post},
+    handle_post::{DeliveredMessages, handle_new_post, handle_video_link, process_post},
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
     types::{ButtonCallbackData, SubscriptionArgs},
@@ -329,6 +329,40 @@ async fn handle_repost_gallery(
     tg.send_media_group(ChatId(repost_channel_id), media_group)
         .await?;
     Ok(())
+}
+
+/// Direct-invocation seam for the inline-button repost flow. Accepts a
+/// constructed callback payload (the message id(s), the post, and the
+/// with-caption flag) and drives the same flow as `callback_handler` would
+/// for an inline-button callback, without going through teloxide's
+/// `CallbackQuery` dispatcher.
+///
+/// This is used by the live E2E tests to simulate a button tap. The
+/// production dispatcher continues to call the same underlying repost
+/// logic unchanged.
+#[doc(hidden)]
+pub async fn handle_repost_from_callback(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    post: &reddit::Post,
+    delivered: &DeliveredMessages,
+    with_caption: bool,
+) -> Result<()> {
+    let caption = if with_caption {
+        Some(db.get_post_title(chat_id.0, &post.id)?)
+    } else {
+        None
+    };
+    match delivered {
+        DeliveredMessages::Single(message_id) => {
+            handle_repost(db, chat_id, tg, message_id.0, caption).await
+        }
+        DeliveredMessages::Gallery(_) => {
+            let tg_file_ids = db.get_telegram_files_for_post(&post.id, chat_id.0)?;
+            handle_repost_gallery(db, chat_id, tg, tg_file_ids, caption).await
+        }
+    }
 }
 
 async fn handle_get_command(
