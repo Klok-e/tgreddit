@@ -677,11 +677,126 @@ extract_verifier_result() {
   printf '%s\n' "$result" | jq -r . > "$last"
   jq -e '
     type == "object" and
-    (.status == "pass" or .status == "fail") and
+    (.status == "pass" or .status == "fail" or .status == "needs-info" or .status == "blocked") and
     (.summary | type == "string") and
     (.feedback | type == "string") and
     (.commands_run | type == "array")
   ' "$last" >/dev/null
+}
+
+extract_text_parts() {
+  local out="$1"
+
+  if [[ ! -f "$out" ]]; then
+    return 0
+  fi
+
+  json_lines "$out" | jq -rs '
+    [
+      .[]?
+      | select(type == "object")
+      | .part?, .properties?.part?
+      | select(type == "object" and (.type == "text" or .type == "reasoning"))
+      | .text?
+      | select(type == "string")
+    ]
+    | add // ""
+  '
+}
+
+extract_agent_status() {
+  local out="$1"
+  local text
+  local last_line
+  local status
+
+  text="$(extract_text_parts "$out")"
+  last_line="$(printf '%s' "$text" | awk 'NF {p=1} p' | tail -n 1)"
+  status="$(jq -re '.status // empty' <<< "$last_line" 2>/dev/null || true)"
+  printf '%s\n' "$status"
+}
+
+extract_agent_reason() {
+  local out="$1"
+  local text
+  local trimmed
+  local last_line
+
+  text="$(extract_text_parts "$out")"
+  trimmed="$(printf '%s' "$text" | awk 'NF {p=1} p')"
+  last_line="$(printf '%s' "$trimmed" | tail -n 1)"
+
+  if jq -e '.status' <<< "$last_line" >/dev/null 2>&1; then
+    printf '%s' "$trimmed" | sed '$d'
+  else
+    printf '%s' "$text"
+  fi
+}
+
+detect_agent_status() {
+  local out="$1"
+  local opencode_exit="${2:-0}"
+  local status
+
+  status="$(extract_agent_status "$out")"
+  case "$status" in
+    pass|fail|needs-info|blocked)
+      printf '%s\n' "$status"
+      ;;
+    *)
+      if ((opencode_exit != 0)); then
+        printf 'fail\n'
+      else
+        printf 'pass\n'
+      fi
+      ;;
+  esac
+}
+
+reset_loop_action() {
+  LOOP_ACTION=""
+  LOOP_EXIT_STATUS=0
+}
+
+set_loop_continue() {
+  LOOP_ACTION="continue"
+}
+
+set_loop_exit() {
+  LOOP_ACTION="exit"
+  LOOP_EXIT_STATUS="${1:-1}"
+}
+
+handle_terminal_blocker() {
+  local status="$1"
+  local reason="$2"
+  local label
+
+  case "$status" in
+    needs-info)
+      label="needs-info"
+      ;;
+    blocked)
+      label="blocked"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  set_issue_status "$ISSUE_PATH" "$label"
+  append_issue_comment "$ISSUE_PATH" "AFK $label" "$reason"
+  clear_state
+  echo "Issue $label: $ISSUE_PATH"
+
+  if ((RUN_ALL)); then
+    if ! start_next_afkable_issue; then
+      exit 0
+    fi
+    set_loop_continue
+  else
+    exit 0
+  fi
 }
 
 set_issue_status() {
@@ -736,9 +851,13 @@ run_initial_implementer() {
   local issue="$1"
   local title="$2"
   local out="$TMPDIR/implement-initial.jsonl"
+  local opencode_exit=0
+  local status
+  local reason
 
   save_state "initial_implement" 1 ""
-  if ! opencode_afk_run \
+  set +e
+  opencode_afk_run \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
     "$IMPLEMENTER_TITLE" \
@@ -753,21 +872,16 @@ Your job:
 1. Read the issue file and relevant repo docs.
 2. Implement the issue using TDD.
 3. Do not commit.
-4. If blocked, ambiguous, or unsafe, stop and explain the blocker in your final message.
+4. End your final message with exactly one JSON line: \`{"status":"pass"}\` on success, \`{"status":"needs-info"}\` when waiting on context/credentials, or \`{"status":"blocked"}\` when unresolvable/unsafe. Put any explanation before the JSON line.
 
 Rules:
 - Do not implement out-of-scope features.
 - Do not change unrelated behavior.
 - Leave the worktree ready for code-quality review.
 PROMPT
-)" 2>&1 | show_opencode_progress "$out"; then
-    capture_session_id "$out" IMPLEMENTER_SESSION_ID
-    if [[ -z "$IMPLEMENTER_SESSION_ID" || "$IMPLEMENTER_SESSION_ID" == "null" ]]; then
-      recover_implementer_session_id || true
-    fi
-    save_state "initial_implement" 1 ""
-    return 1
-  fi
+)" 2>&1 | show_opencode_progress "$out"
+  opencode_exit=${PIPESTATUS[0]}
+  set -e
 
   capture_session_id "$out" IMPLEMENTER_SESSION_ID
   if [[ -z "$IMPLEMENTER_SESSION_ID" || "$IMPLEMENTER_SESSION_ID" == "null" ]]; then
@@ -777,8 +891,22 @@ PROMPT
     echo "Could not capture implementer session id." >&2
     exit 1
   fi
-  clear_transient_session
-  save_state "code_quality" 1 ""
+
+  status="$(detect_agent_status "$out" "$opencode_exit")"
+  case "$status" in
+    pass)
+      clear_transient_session
+      save_state "code_quality" 1 ""
+      ;;
+    needs-info|blocked)
+      reason="$(extract_agent_reason "$out")"
+      handle_terminal_blocker "$status" "$reason"
+      ;;
+    *)
+      save_state "initial_implement" 1 ""
+      set_loop_exit 1
+      ;;
+  esac
 }
 
 continue_implementer() {
@@ -786,8 +914,12 @@ continue_implementer() {
   local cycle="$2"
   local next_cycle="$3"
   local out="$TMPDIR/implement-continue-${cycle}.jsonl"
+  local opencode_exit=0
+  local status
+  local reason
 
-  if ! opencode_afk_resume \
+  set +e
+  opencode_afk_resume \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
     "$IMPLEMENTER_SESSION_ID" \
@@ -797,14 +929,28 @@ Continue the AFK implementation for local issue:
 ${issue}
 
 Continue from the current repository state. Do not commit. Leave the worktree ready for code-quality review.
-PROMPT
-)" 2>&1 | show_opencode_progress "$out"; then
-    save_state "$STATE_PHASE" "$cycle" "$SAVED_FEEDBACK"
-    return 1
-  fi
 
-  clear_transient_session
-  save_state "code_quality" "$next_cycle" ""
+End your final message with exactly one JSON line: \`{"status":"pass"}\`, \`{"status":"needs-info"}\`, or \`{"status":"blocked"}\`. Put any explanation before the JSON line.
+PROMPT
+)" 2>&1 | show_opencode_progress "$out"
+  opencode_exit=${PIPESTATUS[0]}
+  set -e
+
+  status="$(detect_agent_status "$out" "$opencode_exit")"
+  case "$status" in
+    pass)
+      clear_transient_session
+      save_state "code_quality" "$next_cycle" ""
+      ;;
+    needs-info|blocked)
+      reason="$(extract_agent_reason "$out")"
+      handle_terminal_blocker "$status" "$reason"
+      ;;
+    *)
+      save_state "$STATE_PHASE" "$cycle" "$SAVED_FEEDBACK"
+      set_loop_exit 1
+      ;;
+  esac
 }
 
 resume_implementer() {
@@ -812,6 +958,9 @@ resume_implementer() {
   local cycle="$2"
   local feedback="$3"
   local out="$TMPDIR/implement-cycle-${cycle}.jsonl"
+  local opencode_exit=0
+  local status
+  local reason
 
   if [[ -z "$IMPLEMENTER_SESSION_ID" ]]; then
     recover_implementer_session_id || true
@@ -823,7 +972,8 @@ resume_implementer() {
   fi
 
   save_state "resume_implement" "$cycle" "$feedback"
-  if ! opencode_afk_resume \
+  set +e
+  opencode_afk_resume \
     afk-implementer \
     "$IMPLEMENTER_MODEL" \
     "$IMPLEMENTER_SESSION_ID" \
@@ -837,17 +987,31 @@ Address the verifier feedback below, then leave the worktree ready for code-qual
 Do not commit.
 Do not change out-of-scope behavior.
 
+End your final message with exactly one JSON line: \`{"status":"pass"}\`, \`{"status":"needs-info"}\`, or \`{"status":"blocked"}\`. Put any explanation before the JSON line.
+
 Verifier feedback:
 
 ${feedback}
 PROMPT
-)" 2>&1 | show_opencode_progress "$out"; then
-    save_state "resume_implement" "$cycle" "$feedback"
-    return 1
-  fi
+)" 2>&1 | show_opencode_progress "$out"
+  opencode_exit=${PIPESTATUS[0]}
+  set -e
 
-  clear_transient_session
-  save_state "code_quality" "$((cycle + 1))" ""
+  status="$(detect_agent_status "$out" "$opencode_exit")"
+  case "$status" in
+    pass)
+      clear_transient_session
+      save_state "code_quality" "$((cycle + 1))" ""
+      ;;
+    needs-info|blocked)
+      reason="$(extract_agent_reason "$out")"
+      handle_terminal_blocker "$status" "$reason"
+      ;;
+    *)
+      save_state "resume_implement" "$cycle" "$feedback"
+      set_loop_exit 1
+      ;;
+  esac
 }
 
 run_code_quality() {
@@ -856,6 +1020,9 @@ run_code_quality() {
   local cycle="$3"
   local out="$TMPDIR/code-quality-cycle-${cycle}.jsonl"
   local prompt
+  local opencode_exit=0
+  local status
+  local reason
 
   prompt="$(cat <<PROMPT
 You are reviewing and improving the current AFK implementation for local issue:
@@ -871,6 +1038,8 @@ Your job:
 4. Run relevant validation commands when feasible.
 5. Do not commit.
 
+End your final message with exactly one JSON line: \`{"status":"pass"}\`, \`{"status":"needs-info"}\`, or \`{"status":"blocked"}\`. Put any explanation before the JSON line.
+
 Leave the worktree ready for final verification.
 PROMPT
 )"
@@ -882,34 +1051,43 @@ PROMPT
     SESSION_PHASE="code_quality"
   fi
   save_state "code_quality" "$cycle" ""
+
+  set +e
   if [[ -n "$SESSION_ID" ]]; then
     echo "Resumed code-quality session: $SESSION_ID"
-    if ! opencode_afk_resume \
+    opencode_afk_resume \
       afk-code-quality \
       "$QUALITY_MODEL" \
       "$SESSION_ID" \
-      "$prompt" 2>&1 | show_opencode_progress "$out"; then
-      capture_session_id "$out" SESSION_ID
-      SESSION_PHASE="code_quality"
-      save_state "code_quality" "$cycle" ""
-      return 1
-    fi
+      "$prompt" 2>&1 | show_opencode_progress "$out"
   else
-    if ! opencode_afk_run \
+    opencode_afk_run \
       afk-code-quality \
       "$QUALITY_MODEL" \
       "" \
-      "$prompt" 2>&1 | show_opencode_progress "$out"; then
-      capture_session_id "$out" SESSION_ID
-      SESSION_PHASE="code_quality"
-      save_state "code_quality" "$cycle" ""
-      return 1
-    fi
+      "$prompt" 2>&1 | show_opencode_progress "$out"
   fi
+  opencode_exit=${PIPESTATUS[0]}
+  set -e
 
   capture_session_id "$out" SESSION_ID
-  clear_transient_session
-  save_state "verify" "$cycle" ""
+
+  status="$(detect_agent_status "$out" "$opencode_exit")"
+  case "$status" in
+    pass)
+      clear_transient_session
+      save_state "verify" "$cycle" ""
+      ;;
+    needs-info|blocked)
+      reason="$(extract_agent_reason "$out")"
+      handle_terminal_blocker "$status" "$reason"
+      ;;
+    *)
+      SESSION_PHASE="code_quality"
+      save_state "code_quality" "$cycle" ""
+      set_loop_exit 1
+      ;;
+  esac
 }
 
 run_verifier() {
@@ -945,6 +1123,10 @@ If verification passes:
 If verification fails:
 1. Do not commit.
 2. Return valid JSON with status "fail" and exact feedback for the implementer.
+
+If you cannot proceed because of missing credentials, ambiguous spec, or unsafe conditions:
+1. Do not commit.
+2. Return valid JSON with status "needs-info" or "blocked" and the reason in feedback.
 
 Final response requirements:
 - JSON object only.
@@ -1002,11 +1184,23 @@ PROMPT
   VERIFY_COMMANDS="$(jq -r '.commands_run | join(", ")' "$last")"
   VERIFY_COMMIT="$(jq -r '.commit // ""' "$last")"
 
-  if [[ "$VERIFY_STATUS" != "pass" && "$VERIFY_STATUS" != "fail" ]]; then
-    echo "Verifier returned invalid status: $VERIFY_STATUS" >&2
-    exit 1
-  fi
+  case "$VERIFY_STATUS" in
+    pass|fail)
+      ;;
+    needs-info|blocked)
+      handle_terminal_blocker "$VERIFY_STATUS" "$VERIFY_FEEDBACK"
+      ;;
+    *)
+      echo "Verifier returned invalid status: $VERIFY_STATUS" >&2
+      exit 1
+      ;;
+  esac
 }
+
+# Allow the harness to be sourced by test scripts without executing the main loop.
+if [[ -n "${AFK_HARNESS_TEST:-}" ]]; then
+  return 0
+fi
 
 REQUESTED_PRD=""
 parse_args "$@"
@@ -1081,6 +1275,8 @@ VERIFY_COMMANDS=""
 VERIFY_COMMIT=""
 SELECTED_PRD=""
 SELECTED_FEATURE_DIR=""
+LOOP_ACTION=""
+LOOP_EXIT_STATUS=0
 
 EXISTING_STATE="$(active_state_file)"
 if [[ -n "$EXISTING_STATE" ]]; then
@@ -1127,6 +1323,8 @@ require_cmd git
 run_preflight
 
 while true; do
+  reset_loop_action
+
   case "$STATE_PHASE" in
     initial_implement)
       if [[ -z "$IMPLEMENTER_SESSION_ID" ]]; then
@@ -1161,23 +1359,31 @@ while true; do
           if ! start_next_afkable_issue; then
             exit 0
           fi
-          continue
+          set_loop_continue
+        else
+          exit 0
         fi
-        exit 0
+      else
+        echo "Verifier failed cycle $CYCLE/$MAX_CYCLES"
+
+        if ((CYCLE == MAX_CYCLES)); then
+          set_issue_status "$ISSUE_PATH" blocked
+          append_issue_comment "$ISSUE_PATH" "AFK blocked after ${MAX_CYCLES} cycles" "$VERIFY_FEEDBACK"
+          clear_state
+          echo "Blocked issue after $MAX_CYCLES cycles: $ISSUE_PATH" >&2
+          if ((RUN_ALL)); then
+            if ! start_next_afkable_issue; then
+              exit 1
+            fi
+            set_loop_continue
+          else
+            exit 1
+          fi
+        fi
+
+        clear_transient_session
+        resume_implementer "$ISSUE_PATH" "$CYCLE" "$VERIFY_FEEDBACK"
       fi
-
-      echo "Verifier failed cycle $CYCLE/$MAX_CYCLES"
-
-      if ((CYCLE == MAX_CYCLES)); then
-        set_issue_status "$ISSUE_PATH" blocked
-        append_issue_comment "$ISSUE_PATH" "AFK blocked after ${MAX_CYCLES} cycles" "$VERIFY_FEEDBACK"
-        clear_state
-        echo "Blocked issue after $MAX_CYCLES cycles: $ISSUE_PATH" >&2
-        exit 1
-      fi
-
-      clear_transient_session
-      resume_implementer "$ISSUE_PATH" "$CYCLE" "$VERIFY_FEEDBACK"
       ;;
     *)
       echo "Unknown AFK state phase: $STATE_PHASE" >&2
@@ -1185,5 +1391,14 @@ while true; do
       ;;
   esac
 
-  load_state "$STATE_PATH"
+  case "$LOOP_ACTION" in
+    continue)
+      ;;
+    exit)
+      exit "$LOOP_EXIT_STATUS"
+      ;;
+    *)
+      load_state "$STATE_PATH"
+      ;;
+  esac
 done

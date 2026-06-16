@@ -93,3 +93,14 @@ Starting opencode agent in sandbox
 ```
 
 Finally, do a short live AFK run when possible. Some bugs only appear in the real combined stream from `sbx`, opencode, and the terminal; persisted opencode records and synthetic JSON tests can both look clean while the live terminal still smears output.
+
+## Exit-Code / JSON Status Contract
+
+`scripts/run_opencode_afk.sh` dispatches on the agent's final status. The agent writes that status as the last line of its final message:
+
+- Implementer and code-quality agents emit `{"status":"pass"}`, `{"status":"needs-info"}`, or `{"status":"blocked"}`.
+- The verifier emits the same statuses inside its JSON object (`pass`, `fail`, `needs-info`, `blocked`).
+
+The harness owns the issue label. It maps `needs-info` to the `needs-info` label and `blocked` to the `blocked` label, appends the agent's final message or verifier `feedback` as a comment, clears transient state, and advances to the next runnable issue when running with `--all`. The agent never sets the label itself. If an implementer or code-quality run exits cleanly but no JSON status line is found, the harness treats it as `pass`.
+
+The harness is workflow-only: it reads the status and the reason, not the agent's reasoning chain.

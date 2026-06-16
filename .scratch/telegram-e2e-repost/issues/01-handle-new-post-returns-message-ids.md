@@ -1,4 +1,4 @@
-Status: complete
+Status: ready-for-agent
 
 # `handle_new_post` Returns Delivered Message Id(s)
 
@@ -25,6 +25,8 @@ Every per-`PostType` helper (`handle_new_image_post`, `handle_new_video_post`, `
 ## AFK completed
 
 Added `DeliveredMessages` two-variant enum (`Single(MessageId)` / `Gallery(Vec<MessageId>)`) in `src/handle_post.rs` and threaded it through `handle_new_post` and every per-`PostType` helper. Gallery helper collects ids from `send_media_group`; the others return the `sent.id` from the single Telegram call. Production callers in `src/main.rs` (debug-post path) and `src/bot.rs` (`/get` command) ignore the new value; `process_post` continues to swallow errors and discard the value. `tests/telegram_e2e.rs` updated to compile against the new signature. Added 4 unit tests covering variant construction and variant selection per `PostType`. `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` all pass (80 unit tests, 4 new).
+
+NOTE: integration tests were not run
 
 ## Blocked by
 

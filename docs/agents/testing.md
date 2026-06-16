@@ -48,4 +48,4 @@ cargo clippy
 cargo test
 ```
 
-Run ignored live integration tests when the change affects external service behavior and the required credentials, config, and network access are available.
+Run integration tests when changes touch code these tests cover.

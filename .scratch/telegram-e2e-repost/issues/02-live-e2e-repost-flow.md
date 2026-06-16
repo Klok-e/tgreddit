@@ -1,4 +1,4 @@
-Status: complete
+Status: ready-for-agent
 
 # Live E2E Exercises Full Deliver-Then-Repost Flow
 
@@ -37,6 +37,8 @@ Added `handle_repost_from_callback` (pub, `#[doc(hidden)]`) in `src/bot.rs` as t
 Rewrote `tests/telegram_e2e.rs` to exercise the full flow per `PostType`: reads operator id from `tgreddit.toml`'s `authorized_user_ids[0]`, reads Repost Channel id from `telegram-e2e.toml`'s `chat_id`, opens a fresh temp SQLite DB, registers the Repost Channel via `db.set_repost_channel`, records the post, delivers via `handle_new_post`, then invokes `handle_repost_from_callback` twice (with/without caption). No assertions on Telegram bodies, markup, or DB state — only `?` propagation. Drift check still hard-asserts `PostType` with an actionable error message.
 
 Selected five fresh Reddit fixture ids: `1a4w7p` (Link), `1a6h2c` (SelfText), `1bjmswl` (Image), `1a0j1c` (Gallery), `1eqpp2` (Video). All five tests remain `#[ignore]`. `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` all pass (80 unit tests).
+
+NOTE: integration tests were not run
 
 ## Blocked by
 

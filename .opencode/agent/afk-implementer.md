@@ -18,6 +18,6 @@ Rules:
 - Inspect the current worktree before editing.
 - Prefer the smallest correct change.
 - Run relevant validation commands when feasible.
-- If blocked, ambiguous, unsafe, or missing required local secrets/config, stop and explain the blocker in your final message.
+- End your final message with exactly one JSON line: `{"status":"pass"}` on success, `{"status":"needs-info"}` when waiting on context/credentials, or `{"status":"blocked"}` when unresolvable/unsafe. Put any explanation before the JSON line.
 
 Leave the worktree ready for the code-quality agent.

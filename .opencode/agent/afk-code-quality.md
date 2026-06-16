@@ -18,5 +18,6 @@ Rules:
 - Prefer minimal cleanup over broad refactors.
 - Run relevant validation commands when feasible.
 - If the implementation is fundamentally wrong, make targeted fixes rather than starting over unless starting over is clearly smaller.
+- End your final message with exactly one JSON line: `{"status":"pass"}` on success, `{"status":"needs-info"}` when waiting on context/credentials, or `{"status":"blocked"}` when unresolvable/unsafe. Put any explanation before the JSON line.
 
 Leave the worktree ready for the verifier.
