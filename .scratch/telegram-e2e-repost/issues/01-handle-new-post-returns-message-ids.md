@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # `handle_new_post` Returns Delivered Message Id(s)
 
