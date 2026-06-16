@@ -43,11 +43,7 @@ Prefer `anyhow::Result` for fallible application flow. Use typed errors, such as
 
 See `docs/agents/testing.md` for the full testing policy.
 
-## Configuration & Secrets
-
-Local runs require `CONFIG_PATH` to point at a TOML config. Use `config.example.toml` as the template for available keys and defaults.
-
-Do not commit real Telegram bot tokens, production chat IDs, local Telegram E2E config, or local SQLite database files. `authorized_users` controls which Telegram users can invoke bot commands.
+Local runs require `CONFIG_PATH` to point at a TOML config. `tgreddit.toml` is git ignored testing config you can use.
 
 ## Documentation
 
