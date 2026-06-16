@@ -1,3 +1,10 @@
+//! Live E2E suite: each per-`PostType` test delivers a Reddit post to the
+//! operator's chat via `handle_new_post` and then invokes the repost seam
+//! twice (with and without caption) to copy the delivered post to the
+//! Repost Channel. All tests run on a multi-threaded tokio runtime because
+//! `handle_new_post`'s video path calls `tokio::task::block_in_place`,
+//! which is only safe on a multi-threaded runtime.
+
 use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
@@ -18,51 +25,51 @@ struct TestCase {
     expected_type: reddit::PostType,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "sends a live link post and re-posts it to the configured Telegram test channel"]
 async fn telegram_e2e_delivers_and_reposts_link_post() -> Result<()> {
     run_case(TestCase {
-        post_id: "1a4w7p",
+        post_id: "k4qide",
         expected_type: reddit::PostType::Link,
     })
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "sends a live self-text post and re-posts it to the configured Telegram test channel"]
 async fn telegram_e2e_delivers_and_reposts_self_text_post() -> Result<()> {
     run_case(TestCase {
-        post_id: "1a6h2c",
+        post_id: "9168hd",
         expected_type: reddit::PostType::SelfText,
     })
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "sends a live image post and re-posts it to the configured Telegram test channel"]
 async fn telegram_e2e_delivers_and_reposts_image_post() -> Result<()> {
     run_case(TestCase {
-        post_id: "1bjmswl",
+        post_id: "d16jkk",
         expected_type: reddit::PostType::Image,
     })
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "sends a live gallery post and re-posts it to the configured Telegram test channel"]
 async fn telegram_e2e_delivers_and_reposts_gallery_post() -> Result<()> {
     run_case(TestCase {
-        post_id: "1a0j1c",
+        post_id: "rb6vbw",
         expected_type: reddit::PostType::Gallery,
     })
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "sends a live video post and re-posts it to the configured Telegram test channel"]
 async fn telegram_e2e_delivers_and_reposts_video_post() -> Result<()> {
     run_case(TestCase {
-        post_id: "1eqpp2",
+        post_id: "98gz9k",
         expected_type: reddit::PostType::Video,
     })
     .await
@@ -89,11 +96,10 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     db.set_repost_channel(operator_id, repost_channel_id)?;
     drop(db);
 
-    // Use a per-test transport bound to this test's runtime, not the
-    // process-global static. A `reqwest::Client` is bound to the
-    // runtime that created it, so sharing the static across
-    // `#[tokio::test]` runtimes (which are per-test) fails with
-    // "dispatch task is gone".
+    // Use a per-test transport instead of the process-global one: each
+    // `#[tokio::test]` runs on its own runtime, and the global transport's
+    // `reqwest::Client` is bound to the runtime that first created it, so
+    // sharing it across tests fails with "dispatch task is gone".
     let transport = reddit::oauth::RedditOAuthTransport::new()?;
     let post = reddit::get_link_via(&transport, test_case.post_id).await?;
     if post.post_type != test_case.expected_type {
@@ -107,9 +113,9 @@ async fn run_case(test_case: TestCase) -> Result<()> {
         );
     }
 
-    // Record the post so the gallery delivery's foreign-key insert and the
-    // seam's `get_post_title` lookup both succeed. Production callers go
-    // through `process_post`, which does this same record step first.
+    // Record the post before delivery so the gallery insert's foreign-key
+    // and the seam's `get_post_title` lookup both succeed; `process_post`
+    // does this same step in production.
     let db = Database::open(&app_config)?;
     db.record_post_seen_with_current_time(operator_id, &post)?;
     drop(db);
@@ -117,14 +123,19 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     let tg = Bot::new(app_config.telegram_bot_token.expose_secret());
     let delivered = handle_post::handle_new_post(&app_config, &tg, operator_id, &post).await?;
 
-    // Repost with caption.
-    let db = Database::open(&app_config)?;
-    bot::handle_repost_from_callback(db, ChatId(operator_id), &tg, &post, &delivered, true).await?;
-
-    // Repost without caption.
-    let db = Database::open(&app_config)?;
-    bot::handle_repost_from_callback(db, ChatId(operator_id), &tg, &post, &delivered, false)
-        .await?;
+    for with_caption in [true, false] {
+        let db = Database::open(&app_config)?;
+        bot::handle_repost_from_callback(
+            db,
+            ChatId(operator_id),
+            &tg,
+            &post,
+            &delivered,
+            with_caption,
+        )
+        .await
+        .with_context(|| format!("repost with_caption={with_caption} failed"))?;
+    }
 
     Ok(())
 }

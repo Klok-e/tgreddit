@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Live E2E Exercises Full Deliver-Then-Repost Flow
 
@@ -53,6 +53,62 @@ Follow-up: `src/reddit/api.rs` changed `get_link_via` from `pub(crate)` to `pub`
 
 - .scratch/telegram-e2e-repost/issues/01-handle-new-post-returns-message-ids.md
 
+## Live test run
+
+Command: `CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture`
+
+Start: 2026-06-16
+
+### Environment notes
+
+- yt-dlp upgraded to `2026.06.09` (from `2026.03.17`) and `curl_cffi==0.12.0` installed via `pip3 install --break-system-packages`. The older yt-dlp rejected `v.redd.it` with "Account authentication is required" and lacked the `Firefox-135` impersonate target.
+- `curl_cffi` is required by yt-dlp's `Firefox-135` impersonate target. Without it, the `Reddit` extractor cannot pass the `OAUTH` challenge.
+
+### Fixture selection
+
+After the initial fixtures drifted, replacement fixtures were hand-picked from the top-listing of stable subreddits:
+
+| PostType  | post_id  | subreddit          |
+|-----------|----------|--------------------|
+| Link      | k4qide   | r/worldnews        |
+| SelfText  | 9168hd   | (original)         |
+| Image     | d16jkk   | (original)         |
+| Gallery   | rb6vbw   | r/interestingasfuck (4 images) |
+| Video     | 98gz9k   | r/Sports (imgur q6Qiey0, 960x960) |
+
+The Gallery fixture was switched from `1ocadd7` to `rb6vbw` because the former had >10 images and exceeded Telegram's media-group limit ("Bad Request: too many messages to send as an album").
+
+The Video fixture was selected through the following drift chain:
+
+- `1eqpp2` (initial guess): drifted to Link.
+- `hrpgzt` (r/gifs, gfycat.com): yt-dlp returned `502 CONNECT tunnel failed` — the sandbox proxy could not reach gfycat.
+- `731bax` (r/Sports, imgur XOBxZPg): the imgur "twitter mp4" format that yt-dlp picks under `bv[height<=1080]+ba/best` has no `width`/`height` metadata, so the filename came out as `_*_NAxNA.mp4` and `parse_metadata_from_path` rejected it with "Video filename should have dimensions".
+- `81aysv` (r/Sports, v.redd.it c2vpyw1bf9j01): passed locally with yt-dlp `2026.06.09` + `curl_cffi 0.12.0`, but the verifier later observed the same `81aysv` URL returning `Account authentication is required` — Reddit had rotated the auth requirement and all 20 v.redd.it URLs sampled from `r/nextfuckinglevel`, `r/funny`, and `r/Sports` now reject the same way. No v.redd.it post is reliably reachable without cookies under current yt-dlp/Reddit.
+- `98gz9k` (r/Sports, imgur q6Qiey0): an imgur GIFV whose "twitter mp4" format embeds proper `width`/`height` metadata, so the production format selection `bv[height<=1080]+ba/best` downloads it as `_*_960x960.mp4`. The post is stable (top-of-all-time in r/Sports) and the Reddit API still classifies it as `Video`. Re-validated end-to-end: 5/5 tests pass.
+
+### Results
+
+```
+running 5 tests
+test telegram_e2e_delivers_and_reposts_link_post ... ok
+test telegram_e2e_delivers_and_reposts_self_text_post ... ok
+test telegram_e2e_delivers_and_reposts_image_post ... ok
+test telegram_e2e_delivers_and_reposts_gallery_post ... ok
+test telegram_e2e_delivers_and_reposts_video_post ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.98s
+```
+
+All 5 tests pass. No drift observed — each fixture matched its expected `PostType`.
+
+### Out-of-scope change reverted
+
+An earlier iteration added `&& !matches!(post.post_type, reddit::PostType::Gallery)` to the `post_hint` re-fetch guard in `src/handle_post.rs`. The verifier flagged this as out-of-scope production behavior change. It was reverted; the gallery test still passes with the original guard (verified by the verifier via `git stash` + re-run of `telegram_e2e_delivers_and_reposts_gallery_post`).
+
 ## Comments
 
 Reopened to gate close on actually running the ignored e2e suite. Previous AFK run completed the code work but did not execute the ignored tests; only unit tests, fmt, and clippy were verified. This is unacceptable because the suite is the only signal that the operator's full deliver-then-repost flow works end-to-end against real Reddit and Telegram. Adding an AC that requires the live run and a `## Live test run` section that records the result.
+
+## AFK completed (live test run)
+
+Re-picked five Reddit fixtures to replace the original (drifted) set: `k4qide` (Link), `9168hd` (SelfText), `d16jkk` (Image), `rb6vbw` (Gallery), `98gz9k` (Video). Switched the test runtime to `#[tokio::test(flavor = "multi_thread")]` because the video path's `tokio::task::block_in_place` is only safe under a multi-threaded runtime. Upgraded `yt-dlp` to `2026.06.09` and installed `curl_cffi==0.12.0` so the Reddit extractor can pass the OAUTH challenge. Reverted an out-of-scope `post_hint` guard tweak in `src/handle_post.rs` after the verifier flagged it; gallery test still passes against the original guard. Ran `CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture`: 5/5 pass in 17.13s, no drift observed. Full results, fixture rationale, and the drift chain for the Video fixture recorded under `## Live test run` above.
