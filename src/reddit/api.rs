@@ -58,7 +58,12 @@ pub async fn get_link(link_id: &str) -> Result<Post> {
     get_link_via(get_transport()?, link_id).await
 }
 
-pub(crate) async fn get_link_via(transport: &RedditOAuthTransport, link_id: &str) -> Result<Post> {
+/// Like [`get_link`], but uses a caller-supplied transport instead of the
+/// process-global one. Useful in tests where each `#[tokio::test]` runs
+/// on its own runtime: a [`reqwest::Client`] is bound to the runtime that
+/// created it, so a client created in one test's runtime fails in
+/// another with "dispatch task is gone".
+pub async fn get_link_via(transport: &RedditOAuthTransport, link_id: &str) -> Result<Post> {
     info!("getting link id {link_id}");
     let path = "/api/info.json";
     let query = [("id", format!("t3_{link_id}"))];

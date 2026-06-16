@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 
 # Live E2E Exercises Full Deliver-Then-Repost Flow
 
@@ -39,6 +39,10 @@ Rewrote `tests/telegram_e2e.rs` to exercise the full flow per `PostType`: reads 
 Selected five fresh Reddit fixture ids: `1a4w7p` (Link), `1a6h2c` (SelfText), `1bjmswl` (Image), `1a0j1c` (Gallery), `1eqpp2` (Video). All five tests remain `#[ignore]`. `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test` all pass (80 unit tests).
 
 NOTE: integration tests were not run
+
+## AFK verification
+
+Follow-up: `src/reddit/api.rs` changed `get_link_via` from `pub(crate)` to `pub` with a doc comment, and `tests/telegram_e2e.rs` now constructs a per-test `RedditOAuthTransport` and calls `get_link_via` instead of the process-global `get_link`. A `reqwest::Client` is bound to the runtime that created it, and the global `TRANSPORT` is initialized lazily on first use; under multiple `#[tokio::test]` runtimes the global client fails with "dispatch task is gone". Per-test transport fixes this without changing test semantics. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all pass (80 unit tests, 5 e2e ignored).
 
 ## Blocked by
 

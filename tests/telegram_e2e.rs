@@ -89,7 +89,13 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     db.set_repost_channel(operator_id, repost_channel_id)?;
     drop(db);
 
-    let post = reddit::get_link(test_case.post_id).await?;
+    // Use a per-test transport bound to this test's runtime, not the
+    // process-global static. A `reqwest::Client` is bound to the
+    // runtime that created it, so sharing the static across
+    // `#[tokio::test]` runtimes (which are per-test) fails with
+    // "dispatch task is gone".
+    let transport = reddit::oauth::RedditOAuthTransport::new()?;
+    let post = reddit::get_link_via(&transport, test_case.post_id).await?;
     if post.post_type != test_case.expected_type {
         let expected = test_case.expected_type;
         bail!(
