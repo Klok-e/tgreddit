@@ -11,7 +11,6 @@ Issues and PRDs for this repo live as markdown files in `.scratch/`.
 - Dependencies are recorded under a `## Blocked by` heading. Use `None` for no dependencies, or one bullet per blocking issue path.
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 - AFK runner state, when used, is stored locally at `.scratch/<feature>/.afk-state.json`.
-- Live Telegram E2E tests are ignored Rust integration tests. Agents may run the relevant ignored test when an issue needs live delivery validation and local `tgreddit.toml` plus `telegram-e2e.toml` are present.
 
 ## Runnable AFK issues
 
