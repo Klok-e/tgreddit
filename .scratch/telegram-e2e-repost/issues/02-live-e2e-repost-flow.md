@@ -1,4 +1,4 @@
-Status: complete
+Status: ready-for-agent
 
 # Live E2E Exercises Full Deliver-Then-Repost Flow
 
@@ -29,6 +29,11 @@ The agent selects five fresh Reddit post ids, one per `PostType` (Image, Video, 
 - [ ] The agent has selected and committed five Reddit fixture ids, one per supported `PostType` (Image, Video, Link, SelfText, Gallery). Selection is the agent's own work; no maintainer pre-pick is required.
 - [ ] The tests remain `#[ignore]` and do not run as part of normal `cargo test`.
 - [ ] `cargo fmt` and `cargo clippy` pass.
+- [ ] All 5 ignored live e2e tests pass when run with `CONFIG_PATH=tgreddit.toml cargo test --test telegram_e2e -- --ignored --nocapture` against local `tgreddit.toml` and `telegram-e2e.toml`. The result (command run, timestamp, pass/fail per test, any drift observed) is recorded under `## Live test run`.
+
+## Live test run
+
+_Filled in by the agent after running the ignored e2e suite._
 
 ## AFK completed
 
@@ -47,3 +52,7 @@ Follow-up: `src/reddit/api.rs` changed `get_link_via` from `pub(crate)` to `pub`
 ## Blocked by
 
 - .scratch/telegram-e2e-repost/issues/01-handle-new-post-returns-message-ids.md
+
+## Comments
+
+Reopened to gate close on actually running the ignored e2e suite. Previous AFK run completed the code work but did not execute the ignored tests; only unit tests, fmt, and clippy were verified. This is unacceptable because the suite is the only signal that the operator's full deliver-then-repost flow works end-to-end against real Reddit and Telegram. Adding an AC that requires the live run and a `## Live test run` section that records the result.

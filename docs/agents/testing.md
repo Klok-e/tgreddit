@@ -48,4 +48,4 @@ cargo clippy
 cargo test
 ```
 
-Run integration tests when changes touch code these tests cover.
+You must run integration tests when changes touch code these tests cover.
