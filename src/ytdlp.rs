@@ -16,7 +16,7 @@ use tempfile::TempDir;
 fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
     vec![
         "--impersonate".into(),
-        "Firefox-135".into(),
+        "Firefox-147".into(),
         "--paths".into(),
         output.into(),
         "--output".into(),
@@ -126,11 +126,23 @@ fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_video_path, parse_metadata_from_path};
+    use super::{get_video_path, make_ytdlp_args, parse_metadata_from_path};
     use std::fs::File;
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
+
+    #[test]
+    fn test_ytdlp_args_use_the_supported_firefox_impersonation_target() {
+        let args = make_ytdlp_args(Path::new("/tmp/output"), "https://example.com/video");
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&args[..2], ["--impersonate", "Firefox-147"]);
+        assert_eq!(args.last().unwrap(), "https://example.com/video");
+    }
 
     fn write_empty_file(path: &Path) {
         File::create(path).expect("create empty test file");
