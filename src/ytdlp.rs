@@ -16,7 +16,7 @@ use tempfile::TempDir;
 fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
     vec![
         "--impersonate".into(),
-        "Firefox-147".into(),
+        "Firefox-135".into(),
         "--paths".into(),
         output.into(),
         "--output".into(),
@@ -140,7 +140,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>();
 
-        assert_eq!(&args[..2], ["--impersonate", "Firefox-147"]);
+        assert_eq!(&args[..2], ["--impersonate", "Firefox-135"]);
         assert_eq!(args.last().unwrap(), "https://example.com/video");
     }
 
