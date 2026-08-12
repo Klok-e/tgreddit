@@ -3,27 +3,69 @@ use crate::{
     handle_post::{DeliveredMessages, handle_new_post, handle_video_link, process_post},
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
-    types::{ButtonCallbackData, SubscriptionArgs},
+    types::{RepostAction, SubscriptionArgs, decode_repost_callback},
 };
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use regex::Regex;
 use secrecy::ExposeSecret;
-use std::{env, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, sync::Mutex, time::Duration};
+use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     dispatching::DefaultKey,
     dptree,
     prelude::*,
     types::{
-        CallbackQuery, ChatId, FileId, InputFile, InputMedia, InputMediaPhoto, Message, MessageId,
-        Update,
+        CallbackQuery, ChatId, FileId, ForceReply, InputFile, InputMedia, InputMediaPhoto, Message,
+        MessageId, Update,
     },
     utils::command::{BotCommands, ParseError},
 };
 use url::Url;
 
 const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
+const MAX_REPOST_CAPTION_CHARS: usize = 1024;
+
+type CaptionEditStore = Arc<Mutex<HashMap<i64, CaptionEditState>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptionEditState {
+    AwaitingInput {
+        post_id: String,
+        is_gallery: bool,
+        source_message_id: MessageId,
+        prompt_message_id: MessageId,
+    },
+    AwaitingConfirmation {
+        post_id: String,
+        is_gallery: bool,
+        source_message_id: MessageId,
+        preview_message_id: MessageId,
+        caption: String,
+    },
+}
+
+impl CaptionEditState {
+    fn post_id(&self) -> &str {
+        match self {
+            Self::AwaitingInput { post_id, .. } | Self::AwaitingConfirmation { post_id, .. } => {
+                post_id
+            }
+        }
+    }
+
+    fn interactive_message_id(&self) -> MessageId {
+        match self {
+            Self::AwaitingInput {
+                prompt_message_id, ..
+            } => *prompt_message_id,
+            Self::AwaitingConfirmation {
+                preview_message_id, ..
+            } => *preview_message_id,
+        }
+    }
+}
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -51,6 +93,8 @@ pub enum Command {
         message_id: i32,
         description: String,
     },
+    #[command(description = "cancel the active caption edit")]
+    Cancel,
 }
 
 pub struct MyBot {
@@ -75,6 +119,7 @@ impl MyBot {
         tg.set_my_commands(Command::bot_commands()).await?;
 
         let tg = Arc::new(tg);
+        let caption_edits: CaptionEditStore = Arc::new(Mutex::new(HashMap::new()));
 
         let handler = dptree::entry()
             .branch(
@@ -102,7 +147,7 @@ impl MyBot {
             );
 
         let dispatcher = Dispatcher::builder(tg.clone(), handler)
-            .dependencies(dptree::deps![config.clone()])
+            .dependencies(dptree::deps![config.clone(), caption_edits])
             .default_handler(|upd| async move {
                 warn!("unhandled update: {upd:?}");
             })
@@ -129,10 +174,180 @@ impl MyBot {
     }
 }
 
-pub async fn handle_no_command(
+async fn mark_edit_cancelled(tg: &Bot, chat_id: ChatId, state: CaptionEditState) {
+    if let Err(err) = tg
+        .edit_message_text(chat_id, state.interactive_message_id(), "Cancelled")
+        .await
+    {
+        warn!("failed to mark caption edit as cancelled: {err}");
+    }
+}
+
+fn take_caption_edit(
+    caption_edits: &CaptionEditStore,
+    chat_id: ChatId,
+) -> Option<CaptionEditState> {
+    caption_edits
+        .lock()
+        .expect("caption edit store poisoned")
+        .remove(&chat_id.0)
+}
+
+fn take_caption_edit_for_post(
+    caption_edits: &CaptionEditStore,
+    chat_id: ChatId,
+    post_id: &str,
+) -> Option<CaptionEditState> {
+    let mut edits = caption_edits.lock().expect("caption edit store poisoned");
+    if edits
+        .get(&chat_id.0)
+        .is_some_and(|edit| edit.post_id() == post_id)
+    {
+        edits.remove(&chat_id.0)
+    } else {
+        None
+    }
+}
+
+fn take_caption_confirmation(
+    caption_edits: &CaptionEditStore,
+    chat_id: ChatId,
+    preview_message_id: MessageId,
+) -> Option<CaptionEditState> {
+    let mut edits = caption_edits.lock().expect("caption edit store poisoned");
+    if matches!(
+        edits.get(&chat_id.0),
+        Some(CaptionEditState::AwaitingConfirmation {
+            preview_message_id: active_preview,
+            ..
+        }) if *active_preview == preview_message_id
+    ) {
+        edits.remove(&chat_id.0)
+    } else {
+        None
+    }
+}
+
+async fn cancel_caption_edit(caption_edits: &CaptionEditStore, tg: &Bot, chat_id: ChatId) -> bool {
+    let Some(state) = take_caption_edit(caption_edits, chat_id) else {
+        return false;
+    };
+    mark_edit_cancelled(tg, chat_id, state).await;
+    true
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CaptionInput<'a> {
+    Valid(&'a str),
+    Blank,
+    TooLong,
+}
+
+fn validate_caption_input(text: &str) -> CaptionInput<'_> {
+    if text.trim().is_empty() {
+        CaptionInput::Blank
+    } else if text.encode_utf16().count() > MAX_REPOST_CAPTION_CHARS {
+        CaptionInput::TooLong
+    } else {
+        CaptionInput::Valid(text)
+    }
+}
+
+async fn handle_caption_input(
+    message: &Message,
+    tg: &Bot,
+    caption_edits: &CaptionEditStore,
+) -> Result<bool> {
+    let chat_id = message.chat.id;
+    let reply_to = message.reply_to_message().map(|message| message.id);
+    let state = caption_edits
+        .lock()
+        .expect("caption edit store poisoned")
+        .get(&chat_id.0)
+        .cloned();
+    let Some(CaptionEditState::AwaitingInput {
+        post_id,
+        is_gallery,
+        source_message_id,
+        prompt_message_id,
+    }) = state
+    else {
+        return Ok(false);
+    };
+    if reply_to != Some(prompt_message_id) {
+        return Ok(false);
+    }
+
+    let Some(text) = message.text() else {
+        tg.send_message(chat_id, "Send the Repost Caption as plain text.")
+            .reply_to(prompt_message_id)
+            .await?;
+        return Ok(true);
+    };
+    let caption = match validate_caption_input(text) {
+        CaptionInput::Valid(caption) => caption,
+        CaptionInput::Blank => {
+            tg.send_message(
+                chat_id,
+                "The Repost Caption cannot be blank. Use Post (no caption) instead.",
+            )
+            .reply_to(prompt_message_id)
+            .await?;
+            return Ok(true);
+        }
+        CaptionInput::TooLong => {
+            tg.send_message(
+                chat_id,
+                format!(
+                    "The Repost Caption must be at most {MAX_REPOST_CAPTION_CHARS} characters."
+                ),
+            )
+            .reply_to(prompt_message_id)
+            .await?;
+            return Ok(true);
+        }
+    };
+
+    let preview = tg
+        .send_message(chat_id, format!("Repost Caption preview:\n\n{caption}"))
+        .reply_markup(messages::format_caption_confirmation_buttons())
+        .await?;
+    let transitioned = {
+        let mut edits = caption_edits.lock().expect("caption edit store poisoned");
+        if matches!(
+            edits.get(&chat_id.0),
+            Some(CaptionEditState::AwaitingInput {
+                prompt_message_id: active_prompt,
+                ..
+            }) if *active_prompt == prompt_message_id
+        ) {
+            edits.insert(
+                chat_id.0,
+                CaptionEditState::AwaitingConfirmation {
+                    post_id,
+                    is_gallery,
+                    source_message_id,
+                    preview_message_id: preview.id,
+                    caption: caption.to_owned(),
+                },
+            );
+            true
+        } else {
+            false
+        }
+    };
+    if !transitioned {
+        tg.edit_message_text(chat_id, preview.id, "Cancelled")
+            .await?;
+    }
+    Ok(true)
+}
+
+async fn handle_no_command(
     message: Message,
     tg: Arc<Bot>,
     config: Arc<config::Config>,
+    caption_edits: CaptionEditStore,
 ) -> Result<()> {
     async fn handle(message: &Message, tg: &Arc<Bot>, config: &Arc<config::Config>) -> Result<()> {
         lazy_static! {
@@ -162,6 +377,9 @@ pub async fn handle_no_command(
 
         Ok(())
     }
+    if handle_caption_input(&message, &tg, &caption_edits).await? {
+        return Ok(());
+    }
     if let Err(err) = handle(&message, &tg, &config).await {
         error!("failed to handle message: {err:?}");
         tg.send_message(message.chat.id, format!("Something went wrong: {err}"))
@@ -171,17 +389,19 @@ pub async fn handle_no_command(
     Ok(())
 }
 
-pub async fn handle_command(
+async fn handle_command(
     message: Message,
     tg: Arc<Bot>,
     command: Command,
     config: Arc<config::Config>,
+    caption_edits: CaptionEditStore,
 ) -> Result<()> {
     async fn handle(
         message: &Message,
         tg: &Bot,
         command: Command,
         config: Arc<config::Config>,
+        caption_edits: &CaptionEditStore,
     ) -> Result<()> {
         let db = db::Database::open(&config)?;
         match command {
@@ -258,12 +478,18 @@ pub async fn handle_command(
                 };
                 handle_repost(db, message.chat.id, tg, message_id, button_data).await?;
             }
+            Command::Cancel => {
+                if !cancel_caption_edit(caption_edits, tg, message.chat.id).await {
+                    tg.send_message(message.chat.id, "No caption edit is active.")
+                        .await?;
+                }
+            }
         };
 
         Ok(())
     }
 
-    if let Err(err) = handle(&message, &tg, command, config).await {
+    if let Err(err) = handle(&message, &tg, command, config, &caption_edits).await {
         error!("failed to handle message: {err:?}");
         tg.send_message(message.chat.id, "Something went wrong")
             .await?;
@@ -308,12 +534,11 @@ async fn handle_repost_gallery(
 
     for file_id in gallery_file_ids {
         let mut input_media_photo = InputMediaPhoto::new(InputFile::file_id(file_id));
-        // The first InputMediaPhoto in the vector needs to contain the caption and parse_mode;
+        // The first media item carries the caption for the whole gallery.
         if first {
             if let Some(caption) = &post_caption {
                 input_media_photo = input_media_photo.caption(caption);
             }
-            input_media_photo = input_media_photo.parse_mode(teloxide::types::ParseMode::Html);
             first = false;
         }
 
@@ -354,6 +579,19 @@ pub async fn handle_repost_from_callback(
     } else {
         None
     };
+    handle_repost_with_caption(db, chat_id, tg, post, delivered, caption).await
+}
+
+/// Direct-invocation seam for reposting with an explicit plain-text caption.
+#[doc(hidden)]
+pub async fn handle_repost_with_caption(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    post: &reddit::Post,
+    delivered: &DeliveredMessages,
+    caption: Option<String>,
+) -> Result<()> {
     match delivered {
         DeliveredMessages::Single(message_id) => {
             handle_repost(db, chat_id, tg, message_id.0, caption).await
@@ -465,17 +703,12 @@ async fn callback_handler(
     q: CallbackQuery,
     config: Arc<config::Config>,
     tg: Arc<Bot>,
+    caption_edits: CaptionEditStore,
 ) -> Result<()> {
     let db = db::Database::open(&config)?;
-
-    let msg = q.message.expect("Message must exist");
-    let data = q.data.expect("Data expected");
-    let data: ButtonCallbackData = serde_json::from_str(&data)?;
-    let caption = if data.copy_caption {
-        Some(db.get_post_title(msg.chat().id.0, &data.post_id)?)
-    } else {
-        None
-    };
+    let msg = q.message.context("callback message is unavailable")?;
+    let data = decode_repost_callback(q.data.as_deref().context("callback data is missing")?)?;
+    let chat_id = msg.chat().id;
     let msg_id = if let Some(reply_id) = msg
         .regular_message()
         .and_then(|x| x.reply_to_message())
@@ -485,15 +718,110 @@ async fn callback_handler(
     } else {
         msg.id()
     };
-    if data.is_gallery {
-        let tg_file_ids = db.get_telegram_files_for_post(&data.post_id, msg.chat().id.0)?;
-        handle_repost_gallery(db, msg.chat().id, &tg, tg_file_ids, caption)
-            .await
-            .context("Failed handling gallery repost")?;
-    } else {
-        handle_repost(db, msg.chat().id, &tg, msg_id.0, caption)
-            .await
-            .context("Failed handling repost")?;
+
+    match data.action {
+        RepostAction::Post | RepostAction::PostWithoutCaption => {
+            tg.answer_callback_query(q.id).await?;
+            let post_id = data.post_id.context("repost callback has no post id")?;
+            let previous = take_caption_edit_for_post(&caption_edits, chat_id, &post_id);
+            if let Some(previous) = previous {
+                mark_edit_cancelled(&tg, chat_id, previous).await;
+            }
+
+            let caption = if data.action == RepostAction::Post {
+                Some(db.get_post_title(chat_id.0, &post_id)?)
+            } else {
+                None
+            };
+            if data.is_gallery {
+                let file_ids = db.get_telegram_files_for_post(&post_id, chat_id.0)?;
+                handle_repost_gallery(db, chat_id, &tg, file_ids, caption)
+                    .await
+                    .context("Failed handling gallery repost")?;
+            } else {
+                handle_repost(db, chat_id, &tg, msg_id.0, caption)
+                    .await
+                    .context("Failed handling repost")?;
+            }
+        }
+        RepostAction::EditCaption => {
+            tg.answer_callback_query(q.id).await?;
+            let post_id = data.post_id.context("edit callback has no post id")?;
+            if let Some(previous) = take_caption_edit(&caption_edits, chat_id) {
+                mark_edit_cancelled(&tg, chat_id, previous).await;
+            }
+            let current_caption = db.get_post_title(chat_id.0, &post_id)?;
+            let prompt = tg
+                .send_message(
+                    chat_id,
+                    format!(
+                        "Reply with the complete replacement Repost Caption.\n\nCurrent caption:\n{current_caption}"
+                    ),
+                )
+                .reply_markup(
+                    ForceReply::new()
+                        .input_field_placeholder(Some("Enter the Repost Caption".to_owned())),
+                )
+                .await?;
+            caption_edits
+                .lock()
+                .expect("caption edit store poisoned")
+                .insert(
+                    chat_id.0,
+                    CaptionEditState::AwaitingInput {
+                        post_id,
+                        is_gallery: data.is_gallery,
+                        source_message_id: msg_id,
+                        prompt_message_id: prompt.id,
+                    },
+                );
+        }
+        RepostAction::PublishCaption => {
+            let state = take_caption_confirmation(&caption_edits, chat_id, msg.id());
+            let Some(CaptionEditState::AwaitingConfirmation {
+                post_id,
+                is_gallery,
+                source_message_id,
+                preview_message_id,
+                caption,
+            }) = state
+            else {
+                tg.answer_callback_query(q.id)
+                    .text("This caption edit is no longer active.")
+                    .await?;
+                return Ok(());
+            };
+            tg.answer_callback_query(q.id).await?;
+
+            let publish_result: Result<()> = async {
+                if is_gallery {
+                    let file_ids = db.get_telegram_files_for_post(&post_id, chat_id.0)?;
+                    handle_repost_gallery(db, chat_id, &tg, file_ids, Some(caption)).await
+                } else {
+                    handle_repost(db, chat_id, &tg, source_message_id.0, Some(caption)).await
+                }
+            }
+            .await;
+            let status = if publish_result.is_ok() {
+                "Published"
+            } else {
+                "Failed to publish"
+            };
+            tg.edit_message_text(chat_id, preview_message_id, status)
+                .await?;
+            publish_result?;
+        }
+        RepostAction::CancelCaption => {
+            let state = take_caption_confirmation(&caption_edits, chat_id, msg.id());
+            if let Some(state) = state {
+                tg.answer_callback_query(q.id).await?;
+                mark_edit_cancelled(&tg, chat_id, state).await;
+            } else {
+                tg.answer_callback_query(q.id)
+                    .text("This caption edit is no longer active.")
+                    .await?;
+            }
+        }
     }
 
     Ok(())
@@ -535,6 +863,80 @@ fn is_youtube_url(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_plain_text_caption_input() {
+        assert_eq!(
+            validate_caption_input("hello\nworld 👋"),
+            CaptionInput::Valid("hello\nworld 👋")
+        );
+        assert_eq!(validate_caption_input(""), CaptionInput::Blank);
+        assert_eq!(validate_caption_input(" \n\t"), CaptionInput::Blank);
+        let maximum = "a".repeat(MAX_REPOST_CAPTION_CHARS);
+        assert_eq!(
+            validate_caption_input(&maximum),
+            CaptionInput::Valid(&maximum)
+        );
+        let too_long = "a".repeat(MAX_REPOST_CAPTION_CHARS + 1);
+        assert_eq!(validate_caption_input(&too_long), CaptionInput::TooLong);
+        let emoji_limit = "👋".repeat(MAX_REPOST_CAPTION_CHARS / 2);
+        assert_eq!(
+            validate_caption_input(&emoji_limit),
+            CaptionInput::Valid(&emoji_limit)
+        );
+        assert_eq!(
+            validate_caption_input(&format!("{emoji_limit}👋")),
+            CaptionInput::TooLong
+        );
+    }
+
+    #[test]
+    fn caption_edit_state_identifies_post_and_interactive_message() {
+        let state = CaptionEditState::AwaitingConfirmation {
+            post_id: "post-1".to_owned(),
+            is_gallery: false,
+            source_message_id: MessageId(10),
+            preview_message_id: MessageId(11),
+            caption: "replacement".to_owned(),
+        };
+
+        assert_eq!(state.post_id(), "post-1");
+        assert_eq!(state.interactive_message_id(), MessageId(11));
+    }
+
+    #[test]
+    fn confirmation_can_only_be_consumed_once_by_its_preview() {
+        let edits: CaptionEditStore = Arc::new(Mutex::new(HashMap::from([(
+            1,
+            CaptionEditState::AwaitingConfirmation {
+                post_id: "post-1".to_owned(),
+                is_gallery: false,
+                source_message_id: MessageId(10),
+                preview_message_id: MessageId(11),
+                caption: "replacement".to_owned(),
+            },
+        )])));
+
+        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(12)).is_none());
+        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(11)).is_some());
+        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(11)).is_none());
+    }
+
+    #[test]
+    fn direct_repost_only_consumes_an_edit_for_the_same_post() {
+        let edits: CaptionEditStore = Arc::new(Mutex::new(HashMap::from([(
+            1,
+            CaptionEditState::AwaitingInput {
+                post_id: "post-1".to_owned(),
+                is_gallery: false,
+                source_message_id: MessageId(10),
+                prompt_message_id: MessageId(11),
+            },
+        )])));
+
+        assert!(take_caption_edit_for_post(&edits, ChatId(1), "post-2").is_none());
+        assert!(take_caption_edit_for_post(&edits, ChatId(1), "post-1").is_some());
+    }
 
     #[test]
     fn test_parse_twitter_status_url_accepts_twitter_status() {

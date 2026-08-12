@@ -79,6 +79,17 @@ List all subreddit subscriptions for the current conversation.
 Get the current top posts similarly to how subscribing to a subreddit would
 return new posts.
 
+### Reposting media
+
+Media delivered to the bot includes **Post**, **Post (no caption)**, and
+**Edit caption** buttons. Editing asks for a plain-text replacement caption and
+shows a preview with **Publish** and **Cancel** before anything is sent to the
+registered Repost Channel. Only one caption edit can be active per bot chat;
+use `/cancel` to discard it.
+
+Link and self-text posts have a single **Post** button because Telegram treats
+their content as message text rather than a media caption.
+
 ## configuration
 
 ### env vars

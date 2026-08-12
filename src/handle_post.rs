@@ -45,7 +45,7 @@ pub async fn handle_video_link(
         .caption(&caption)
         .height(video.height.into())
         .width(video.width.into())
-        .reply_markup(messages::format_repost_buttons(&video))
+        .reply_markup(messages::format_media_repost_buttons(&video, false))
         .await?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
@@ -71,7 +71,7 @@ async fn handle_new_video_post(
         .caption(&caption)
         .height(video.height.into())
         .width(video.width.into())
-        .reply_markup(messages::format_repost_buttons(post))
+        .reply_markup(messages::format_media_repost_buttons(post, false))
         .await?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
@@ -96,7 +96,7 @@ async fn handle_new_image_post(
                     .send_video(ChatId(chat_id), InputFile::file(path))
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .caption(&caption)
-                    .reply_markup(messages::format_repost_buttons(post))
+                    .reply_markup(messages::format_media_repost_buttons(post, false))
                     .await?;
 
                 info!("gif uploaded post_id={} chat_id={chat_id}", post.id);
@@ -106,7 +106,7 @@ async fn handle_new_image_post(
                     .send_photo(ChatId(chat_id), InputFile::file(path))
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .caption(&caption)
-                    .reply_markup(messages::format_repost_buttons(post))
+                    .reply_markup(messages::format_media_repost_buttons(post, false))
                     .await?;
 
                 info!("image uploaded post_id={} chat_id={chat_id}", post.id);
@@ -130,7 +130,7 @@ async fn handle_new_link_post(
     let sent = tg
         .send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(messages::format_repost_buttons(post))
+        .reply_markup(messages::format_post_button(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(DeliveredMessages::Single(sent.id))
@@ -146,7 +146,7 @@ async fn handle_new_self_post(
     let sent = tg
         .send_message(ChatId(chat_id), message_html)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(messages::format_repost_buttons(post))
+        .reply_markup(messages::format_post_button(post))
         .await?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(DeliveredMessages::Single(sent.id))
@@ -246,7 +246,7 @@ async fn handle_new_gallery_post(
     }
 
     tg.send_message(ChatId(chat_id), "To repost:")
-        .reply_markup(messages::format_repost_buttons_gallery(post, true))
+        .reply_markup(messages::format_media_repost_buttons(post, true))
         .send()
         .await?;
 

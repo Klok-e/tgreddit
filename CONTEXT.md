@@ -1,13 +1,18 @@
-# Glossary
+# TGReddit
 
-This repo uses the following domain terms. Names in code, issues, and PRs
-should match these exactly.
+TGReddit delivers posts to an operator for review and lets the operator publish
+selected posts to a Telegram channel.
 
-- **Channel Download Bot** — the operator's private chat with the bot. The
-  bot delivers new Reddit posts to this chat, attached with an inline
-  repost button. The operator can then move a post to the Repost Channel
-  by tapping the button.
+## Language
 
-- **Repost Channel** — the Telegram channel the bot copies a delivered
-  post into when the operator taps the inline repost button. The channel
-  is registered for the operator via the `/register_channel` command.
+**Channel Download Bot**:
+The operator's private chat with the bot, where posts are delivered for review
+before publication.
+
+**Repost Channel**:
+The Telegram channel where the operator publishes selected posts.
+
+**Repost Caption**:
+The standalone text attached to a post in the Repost Channel. It does not
+include delivery metadata unless the operator explicitly supplies that text.
+_Avoid_: Title, description

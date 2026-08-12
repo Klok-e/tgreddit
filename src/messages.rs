@@ -1,7 +1,7 @@
 use crate::{
     db::Recordable,
     reddit::{self},
-    types::{ButtonCallbackData, Subscription, Video},
+    types::{RepostAction, RepostCallbackData, Subscription, Video},
 };
 use itertools::Itertools;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
@@ -47,30 +47,54 @@ pub fn format_link_video_caption_html(video: &Video) -> String {
     format!("{title}\n{meta}")
 }
 
-pub fn format_repost_buttons_gallery<T: Recordable>(
+fn callback_data<T: Recordable>(post: &T, action: RepostAction, is_gallery: bool) -> String {
+    let data = serde_json::to_string(&RepostCallbackData {
+        action,
+        post_id: Some(post.id().to_owned()),
+        is_gallery,
+    })
+    .expect("repost callback data should serialize");
+    assert!(data.len() <= 64, "Telegram callback data exceeds 64 bytes");
+    data
+}
+
+pub fn format_media_repost_buttons<T: Recordable>(
     post: &T,
     is_gallery: bool,
 ) -> InlineKeyboardMarkup {
-    let callback_data = serde_json::to_string(&ButtonCallbackData {
-        post_id: post.id().to_owned(),
-        copy_caption: true,
-        is_gallery,
-    })
-    .expect("This can't fail i promise");
-    let callback_data_no_title = serde_json::to_string(&ButtonCallbackData {
-        post_id: post.id().to_owned(),
-        copy_caption: false,
-        is_gallery,
-    })
-    .expect("Can't fail");
     InlineKeyboardMarkup::default().append_row([
-        InlineKeyboardButton::callback("Post", callback_data),
-        InlineKeyboardButton::callback("Post (no title)", callback_data_no_title),
+        InlineKeyboardButton::callback("Post", callback_data(post, RepostAction::Post, is_gallery)),
+        InlineKeyboardButton::callback(
+            "Post (no caption)",
+            callback_data(post, RepostAction::PostWithoutCaption, is_gallery),
+        ),
+        InlineKeyboardButton::callback(
+            "Edit caption",
+            callback_data(post, RepostAction::EditCaption, is_gallery),
+        ),
     ])
 }
 
-pub fn format_repost_buttons<T: Recordable>(post: &T) -> InlineKeyboardMarkup {
-    format_repost_buttons_gallery(post, false)
+pub fn format_post_button<T: Recordable>(post: &T) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
+        "Post",
+        callback_data(post, RepostAction::Post, false),
+    )])
+}
+
+pub fn format_caption_confirmation_buttons() -> InlineKeyboardMarkup {
+    let serialize = |action| {
+        serde_json::to_string(&RepostCallbackData {
+            action,
+            post_id: None,
+            is_gallery: false,
+        })
+        .expect("caption confirmation callback should serialize")
+    };
+    InlineKeyboardMarkup::default().append_row([
+        InlineKeyboardButton::callback("Publish", serialize(RepostAction::PublishCaption)),
+        InlineKeyboardButton::callback("Cancel", serialize(RepostAction::CancelCaption)),
+    ])
 }
 
 pub fn format_link_message_html(post: &reddit::Post, links_base_url: Option<&str>) -> String {
@@ -114,7 +138,32 @@ pub fn format_subscription_list(post: &[Subscription]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Recordable;
     use crate::reddit::TopPostsTimePeriod;
+    use teloxide::types::InlineKeyboardButtonKind;
+
+    struct TestPost;
+
+    impl Recordable for TestPost {
+        fn id(&self) -> &str {
+            "abc123"
+        }
+
+        fn title(&self) -> &str {
+            "title"
+        }
+
+        fn subreddit(&self) -> &str {
+            "test"
+        }
+    }
+
+    fn button_action(button: &InlineKeyboardButton) -> RepostAction {
+        let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+            panic!("expected callback button")
+        };
+        crate::types::decode_repost_callback(data).unwrap().action
+    }
 
     #[test]
     fn test_format_html_anchor() {
@@ -122,6 +171,49 @@ mod tests {
             format_html_anchor("https://example.com", "<hello></world>"),
             r#"<a href="https://example.com">&lt;hello&gt;&lt;/world&gt;</a>"#
         )
+    }
+
+    #[test]
+    fn media_repost_buttons_offer_all_caption_actions() {
+        let keyboard = format_media_repost_buttons(&TestPost, true);
+        let buttons = &keyboard.inline_keyboard[0];
+
+        assert_eq!(
+            buttons
+                .iter()
+                .map(|button| button.text.as_str())
+                .collect_vec(),
+            ["Post", "Post (no caption)", "Edit caption"]
+        );
+        assert_eq!(
+            buttons.iter().map(button_action).collect_vec(),
+            [
+                RepostAction::Post,
+                RepostAction::PostWithoutCaption,
+                RepostAction::EditCaption,
+            ]
+        );
+    }
+
+    #[test]
+    fn non_media_repost_buttons_only_offer_post() {
+        let keyboard = format_post_button(&TestPost);
+        let buttons = &keyboard.inline_keyboard[0];
+
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].text, "Post");
+        assert_eq!(button_action(&buttons[0]), RepostAction::Post);
+    }
+
+    #[test]
+    fn confirmation_buttons_offer_publish_and_cancel() {
+        let keyboard = format_caption_confirmation_buttons();
+        let buttons = &keyboard.inline_keyboard[0];
+
+        assert_eq!(
+            buttons.iter().map(button_action).collect_vec(),
+            [RepostAction::PublishCaption, RepostAction::CancelCaption]
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Live E2E suite: each per-`PostType` test delivers a Reddit post to the
 //! operator's chat via `handle_new_post` and then invokes the repost seam
-//! twice (with and without caption) to copy the delivered post to the
-//! Repost Channel. All tests run on a multi-threaded tokio runtime because
+//! using the controls supported by that post type. Media posts are copied
+//! with their title, without a caption, and with a custom plain-text caption;
+//! non-media posts are copied once. All tests run on a multi-threaded tokio runtime because
 //! `handle_new_post`'s video path calls `tokio::task::block_in_place`,
 //! which is only safe on a multi-threaded runtime.
 
@@ -123,18 +124,31 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     let tg = Bot::new(app_config.telegram_bot_token.expose_secret());
     let delivered = handle_post::handle_new_post(&app_config, &tg, operator_id, &post).await?;
 
-    for with_caption in [true, false] {
+    let media_post = matches!(
+        post.post_type,
+        reddit::PostType::Image | reddit::PostType::Video | reddit::PostType::Gallery
+    );
+    let caption_variants = if media_post {
+        vec![
+            Some(post.title.clone()),
+            None,
+            Some("Custom E2E Repost Caption 👋".to_owned()),
+        ]
+    } else {
+        vec![Some(post.title.clone())]
+    };
+    for caption in caption_variants {
         let db = Database::open(&app_config)?;
-        bot::handle_repost_from_callback(
+        bot::handle_repost_with_caption(
             db,
             ChatId(operator_id),
             &tg,
             &post,
             &delivered,
-            with_caption,
+            caption.clone(),
         )
         .await
-        .with_context(|| format!("repost with_caption={with_caption} failed"))?;
+        .with_context(|| format!("repost with caption {caption:?} failed"))?;
     }
 
     Ok(())
