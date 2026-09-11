@@ -87,13 +87,15 @@ return new posts.
 
 Every private Reddit review message shows one visible, clickable link to the Reddit post. Directly submitted media shows its submitted URL. Media and galleries include **Post**, **Post (no caption)**, and **Post (with link)** buttons. Link and self-text posts include **Post** and **Post (with link)**.
 
+For a direct X/Twitter status video, the default Repost Caption is the X Tweet Body resolved by `yt-dlp`: it keeps line breaks and non-`t.co` links, but removes all `t.co` URLs. If it cannot fit Telegram's media-caption limit with the visible source link, TGReddit shortens it at a Unicode boundary and adds an ellipsis. A Tweet Body made only of `t.co` URLs produces no caption; missing metadata falls back to the downloaded video's title.
+
 **Post** selects the current Repost Caption. **Post (no caption)** selects media without a caption. **Post (with link)** appends a blank line and the exact Source URL; this is the submitted download URL for directly downloaded media and the Reddit submission permalink for galleries and self-text posts.
 
 Choosing a variant replaces the review keyboard with a variant-specific **Confirm** button and **Cancel**. Captioned variants also open a ForceReply editor. Telegram cannot prefill a reply, so the prompt shows the current caption for reference. A reply replaces the Repost Caption on the original review message, preserves Telegram-native formatting such as bold, italic, spoilers, code, quotes, and embedded links, and removes both the prompt and reply after a successful edit.
 
 Only one edit can be active per private chat. Starting another edit cancels the previous prompt. Completed captions, rich-text formatting, Source URLs, review targets, and pending confirmation choices are stored in SQLite so review posts remain usable after a restart; unfinished ForceReply prompts may be cancelled by a restart.
 
-Telegram limits media captions to 1,024 UTF-16 units and text messages to 4,096. TGReddit reserves room for the visible post link and the Source URL before accepting an edit, reports the available limit when a reply is too long, and never truncates the caption or URL.
+Telegram limits media captions to 1,024 UTF-16 units and text messages to 4,096. TGReddit reserves room for the visible post link and the Source URL before accepting an edit, reports the available limit when a reply is too long, and never truncates an edited caption or URL. The initial automatic caption for an over-limit direct X/Twitter video is the exception: it is shortened with an ellipsis as described above.
 
 After successful publication, the bot removes the review buttons to prevent duplicate posts. Cancellation restores the previous keyboard, and a Telegram publication failure preserves the edited caption and restores the keyboard for retrying.
 

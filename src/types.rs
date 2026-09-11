@@ -14,6 +14,8 @@ pub struct Video {
     pub url: String,
     pub id: String,
     pub title: String,
+    /// Extractor-supplied long-form description, when available.
+    pub description: Option<String>,
     pub width: u16,
     pub height: u16,
     pub _video_tempdir: TempDir,

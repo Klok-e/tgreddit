@@ -16,6 +16,10 @@ The Telegram channel where the operator publishes selected posts.
 The standalone rich text attached to a post in the Repost Channel. It does not include private review metadata unless the operator explicitly supplies that text.
 _Avoid_: Title, description
 
+**X Tweet Body**:
+The text TGReddit derives from an X status for its default Repost Caption, excluding all `t.co` URLs while retaining other URLs.
+_Avoid_: Tweet description, X metadata
+
 **Review Post**:
 The message in the Channel Download Bot that shows the current Repost Caption, one visible link to the Reddit post, and the controls for selecting an output. Direct media submissions show their submitted URL. It remains the authoritative preview while the operator edits or confirms publication.
 

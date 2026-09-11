@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use duct::cmd;
 use lazy_static::lazy_static;
 use log::{info, warn};
+use serde::Deserialize;
 use std::{
     ffi::OsString,
     fs, io,
@@ -22,6 +23,11 @@ const YOUTUBE_FORMATS: &[&str] = &[
     "18",
 ];
 const GENERIC_FORMATS: &[&str] = &["bv[height<=1080]+ba/best"];
+
+#[derive(Deserialize)]
+struct YtdlpInfo {
+    description: Option<String>,
+}
 
 fn format_selectors(url: &str) -> &'static [&'static str] {
     let is_youtube = Url::parse(url)
@@ -59,6 +65,7 @@ fn make_ytdlp_args(output: &Path, url: &str, format_selector: &str) -> Vec<OsStr
         "res,ext:mp4:m4a".into(),
         "--recode".into(),
         "mp4".into(),
+        "--write-info-json".into(),
         "--no-playlist".into(),
         url.into(),
     ]
@@ -137,11 +144,13 @@ fn video_from_download(url: &str, tmp_dir: TempDir, successful_path: PathBuf) ->
 
     let (title, id, width, height) =
         parse_metadata_from_path(&video_path).context("Video filename should have dimensions")?;
+    let description = description_from_info_json(&successful_path, &video_path)?;
 
     let video = Video {
         path: video_path,
         url: url.to_owned(),
         title,
+        description,
         id,
         width,
         height,
@@ -153,16 +162,22 @@ fn video_from_download(url: &str, tmp_dir: TempDir, successful_path: PathBuf) ->
     Ok(video)
 }
 
-/// Pick the path of the yt-dlp output file in `dir`.
+/// Pick the path of the recoded yt-dlp video output file in `dir`.
 ///
-/// When yt-dlp writes more than one file, this selects the file with the
-/// oldest modification timestamp; if timestamps are equal or unavailable,
-/// paths are used as a deterministic tiebreaker.
+/// Metadata sidecars and transient downloader files are deliberately excluded.
+/// When yt-dlp writes more than one MP4 file, this selects the file with the
+/// oldest modification timestamp; if timestamps are equal or unavailable, paths
+/// are used as a deterministic tiebreaker.
 fn get_video_path(dir: &Path) -> Result<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .context("Could not read files in temp dir")?
         .map(|entry| entry.map(|e| e.path()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| {
+            path.is_file() && path.extension().is_some_and(|extension| extension == "mp4")
+        })
+        .collect();
 
     // Sort by (modified time, path) so the oldest modified file wins and ties
     // resolve to a deterministic ordering independent of the filesystem.
@@ -175,7 +190,69 @@ fn get_video_path(dir: &Path) -> Result<PathBuf> {
     entries
         .into_iter()
         .next()
-        .context("No video file in temp dir")
+        .context("No recoded MP4 video file in temp dir")
+}
+
+/// Read yt-dlp's structured description for the selected media file.
+///
+/// `--write-info-json` must produce exactly one sidecar per attempt. Matching
+/// its basename to the selected MP4 prevents an unrelated leftover sidecar from
+/// becoming the video's caption metadata.
+fn description_from_info_json(dir: &Path, video_path: &Path) -> Result<Option<String>> {
+    let info_paths: Vec<PathBuf> = fs::read_dir(dir)
+        .context("Could not read yt-dlp metadata directory")?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(".info.json"))
+        })
+        .collect();
+
+    let [info_path] = info_paths.as_slice() else {
+        anyhow::bail!(
+            "Expected exactly one yt-dlp .info.json metadata sidecar in {}, found {}",
+            dir.display(),
+            info_paths.len()
+        );
+    };
+
+    let video_stem = video_path
+        .file_stem()
+        .context("Downloaded video has no filename stem")?;
+    let info_name = info_path
+        .file_name()
+        .context("yt-dlp metadata sidecar has no filename")?
+        .to_string_lossy();
+    let info_stem = info_name
+        .strip_suffix(".info.json")
+        .context("yt-dlp metadata sidecar does not end in .info.json")?;
+
+    if info_stem != video_stem.to_string_lossy() {
+        anyhow::bail!(
+            "yt-dlp metadata sidecar {} does not match downloaded video {}",
+            info_path.display(),
+            video_path.display()
+        );
+    }
+
+    let file = fs::File::open(info_path).with_context(|| {
+        format!(
+            "Could not open yt-dlp metadata sidecar {}",
+            info_path.display()
+        )
+    })?;
+    let info: YtdlpInfo = serde_json::from_reader(file).with_context(|| {
+        format!(
+            "Could not parse yt-dlp metadata sidecar {}",
+            info_path.display()
+        )
+    })?;
+
+    Ok(info.description)
 }
 
 fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
@@ -202,8 +279,9 @@ fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GENERIC_FORMATS, YOUTUBE_FORMATS, YtdlpRunner, download_with_runner, fallback_reason,
-        format_selectors, get_video_path, make_ytdlp_args, parse_metadata_from_path,
+        GENERIC_FORMATS, YOUTUBE_FORMATS, YtdlpRunner, description_from_info_json,
+        download_with_runner, fallback_reason, format_selectors, get_video_path, make_ytdlp_args,
+        parse_metadata_from_path,
     };
     use std::collections::VecDeque;
     use std::ffi::OsString;
@@ -242,6 +320,10 @@ mod tests {
             self.output_paths.push(output_path.clone());
             if status == 0 {
                 fs::write(output_path.join("video_[id]_1280x720.mp4"), [])?;
+                fs::write(
+                    output_path.join("video_[id]_1280x720.info.json"),
+                    r#"{"description":"Full description\nwith Unicode: Привіт"}"#,
+                )?;
             } else {
                 fs::write(output_path.join("partial.part"), [])?;
             }
@@ -298,6 +380,10 @@ mod tests {
         let video = download_with_runner("https://youtu.be/video", &mut runner).unwrap();
 
         assert_eq!(video.title, "video");
+        assert_eq!(
+            video.description.as_deref(),
+            Some("Full description\nwith Unicode: Привіт")
+        );
         assert_eq!(
             runner.selectors,
             [
@@ -380,6 +466,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(&args[..2], ["--impersonate", "Firefox-135"]);
+        assert!(args.contains(&"--write-info-json".into()));
         assert_eq!(args.last().unwrap(), "https://example.com/video");
     }
 
@@ -401,6 +488,19 @@ mod tests {
         let only = dir.path().join("only.mp4");
         write_empty_file(&only);
         assert_eq!(get_video_path(dir.path()).unwrap(), only);
+    }
+
+    #[test]
+    fn test_get_video_path_ignores_metadata_and_downloader_artifacts() {
+        let dir = TempDir::new().expect("create tempdir");
+        let video = dir.path().join("video_[id]_1280x720.mp4");
+        let sidecar = dir.path().join("video_[id]_1280x720.info.json");
+        let partial = dir.path().join("video_[id]_1280x720.mp4.part");
+        write_empty_file(&video);
+        write_empty_file(&sidecar);
+        write_empty_file(&partial);
+
+        assert_eq!(get_video_path(dir.path()).unwrap(), video);
     }
 
     #[test]
@@ -444,6 +544,85 @@ mod tests {
         let dir = TempDir::new().expect("create tempdir");
         let result = get_video_path(dir.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn description_from_info_json_preserves_multiline_unicode_text() {
+        let dir = TempDir::new().expect("create tempdir");
+        let video = dir.path().join("tweet_[123]_1280x720.mp4");
+        write_empty_file(&video);
+        fs::write(
+            dir.path().join("tweet_[123]_1280x720.info.json"),
+            r#"{"description":"Line one\nПривіт https://t.co/example"}"#,
+        )
+        .expect("write info json");
+
+        assert_eq!(
+            description_from_info_json(dir.path(), &video).unwrap(),
+            Some("Line one\nПривіт https://t.co/example".into())
+        );
+    }
+
+    #[test]
+    fn description_from_info_json_allows_missing_description() {
+        let dir = TempDir::new().expect("create tempdir");
+        let video = dir.path().join("tweet_[123]_1280x720.mp4");
+        write_empty_file(&video);
+        fs::write(
+            dir.path().join("tweet_[123]_1280x720.info.json"),
+            r#"{"title":"fallback title"}"#,
+        )
+        .expect("write info json");
+
+        assert_eq!(
+            description_from_info_json(dir.path(), &video).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn description_from_info_json_reports_missing_or_invalid_sidecars() {
+        let dir = TempDir::new().expect("create tempdir");
+        let video = dir.path().join("tweet_[123]_1280x720.mp4");
+        write_empty_file(&video);
+
+        let missing = description_from_info_json(dir.path(), &video).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("exactly one yt-dlp .info.json")
+        );
+
+        fs::write(
+            dir.path().join("tweet_[123]_1280x720.info.json"),
+            "not JSON",
+        )
+        .expect("write invalid info json");
+        let invalid = description_from_info_json(dir.path(), &video).unwrap_err();
+        assert!(
+            invalid
+                .to_string()
+                .contains("Could not parse yt-dlp metadata sidecar")
+        );
+    }
+
+    #[test]
+    fn description_from_info_json_rejects_sidecar_for_another_video() {
+        let dir = TempDir::new().expect("create tempdir");
+        let video = dir.path().join("tweet_[123]_1280x720.mp4");
+        write_empty_file(&video);
+        fs::write(
+            dir.path().join("other_[456]_1280x720.info.json"),
+            r#"{"description":"wrong tweet"}"#,
+        )
+        .expect("write mismatched info json");
+
+        let error = description_from_info_json(dir.path(), &video).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match downloaded video")
+        );
     }
 
     #[test]

@@ -417,13 +417,13 @@ async fn handle_no_command(
         let db = db::Database::open(config)
             .map_err(|err| user_error("The local database could not be accessed.", err))?;
         if let Some(link) = parse_twitter_status_url(text) {
-            handle_video_link(&db, tg, message.chat.id.0, &link)
+            handle_video_link(&db, tg, message.chat.id.0, &link, true)
                 .await
                 .map_err(|err| user_error("The video link could not be processed.", err))?;
         } else if is_youtube_url(text) {
             let link =
                 Url::parse(text).map_err(|err| user_error("The video link is invalid.", err))?;
-            handle_video_link(&db, tg, message.chat.id.0, &link)
+            handle_video_link(&db, tg, message.chat.id.0, &link, false)
                 .await
                 .map_err(|err| user_error("The video link could not be processed.", err))?;
         } else {

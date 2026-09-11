@@ -8,9 +8,11 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use log::*;
+use regex::Regex;
 use url::Url;
 
 use std::string::ToString;
+use std::sync::LazyLock;
 use std::{borrow::Cow, path::PathBuf};
 use std::{collections::HashMap, path::Path};
 use teloxide::types::{InputFile, InputMediaVideo, MessageId};
@@ -52,6 +54,7 @@ pub async fn handle_video_link(
     tg: &Bot,
     chat_id: i64,
     link: &Url,
+    is_twitter_status: bool,
 ) -> Result<()> {
     let video = tokio::task::block_in_place(|| ytdlp::download(link.as_str()))
         .context("Failed to download video from link")?;
@@ -59,11 +62,16 @@ pub async fn handle_video_link(
     db.record_post_seen_with_current_time(chat_id, &video)?;
 
     info!("got a video: {video:?}");
+    let metadata = messages::format_video_review_metadata(&video);
     let caption = RichText {
-        text: video.title.clone(),
+        text: direct_video_caption(
+            is_twitter_status,
+            &video.title,
+            video.description.as_deref(),
+            &metadata,
+        ),
         entities: Vec::new(),
     };
-    let metadata = messages::format_video_review_metadata(&video);
     let review = messages::compose_review_text(&caption, &metadata);
     let sent = tg
         .send_video(ChatId(chat_id), InputFile::file(&video.path))
@@ -94,6 +102,120 @@ pub async fn handle_video_link(
         video.id
     );
     Ok(())
+}
+
+fn direct_video_caption(
+    is_twitter_status: bool,
+    title: &str,
+    description: Option<&str>,
+    metadata: &RichText,
+) -> String {
+    if is_twitter_status
+        && let Some(description) = description.filter(|description| !description.trim().is_empty())
+    {
+        return truncate_caption_for_metadata(&clean_x_tweet_body(description), metadata);
+    }
+    title.to_owned()
+}
+
+fn clean_x_tweet_body(description: &str) -> String {
+    static TCO_URL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"[hH][tT][tT][pP][sS]?://[tT]\.[cC][oO]/[A-Za-z0-9]+")
+            .expect("the t.co URL expression is valid")
+    });
+
+    description
+        .split_inclusive('\n')
+        .filter_map(|line_with_ending| {
+            let (line, ending) = line_with_ending
+                .strip_suffix('\n')
+                .map_or((line_with_ending, ""), |line| (line, "\n"));
+            let (cleaned_line, removed_tco_url) = remove_tco_urls_from_line(line, &TCO_URL);
+
+            // A line made entirely of t.co URLs has no Tweet Body content, so
+            // discard it together with its separator. Empty lines that were
+            // already present stay intact as authored paragraph boundaries.
+            if removed_tco_url && cleaned_line.trim().is_empty() {
+                None
+            } else {
+                Some(format!("{cleaned_line}{ending}"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn remove_tco_urls_from_line(line: &str, tco_url: &Regex) -> (String, bool) {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut previous_end = 0;
+    let mut follows_removed_url = false;
+    let mut removed_tco_url = false;
+
+    for matched_url in tco_url.find_iter(line) {
+        append_after_tco_removal(
+            &mut cleaned,
+            &line[previous_end..matched_url.start()],
+            follows_removed_url,
+        );
+        previous_end = matched_url.end();
+        follows_removed_url = true;
+        removed_tco_url = true;
+    }
+    append_after_tco_removal(&mut cleaned, &line[previous_end..], follows_removed_url);
+
+    (cleaned, removed_tco_url)
+}
+
+fn append_after_tco_removal(destination: &mut String, text: &str, follows_removed_url: bool) {
+    if follows_removed_url
+        && (text.is_empty()
+            || text
+                .chars()
+                .next()
+                .is_some_and(is_tco_url_boundary_punctuation))
+    {
+        let trimmed_len = destination.trim_end_matches([' ', '\t', '\r']).len();
+        destination.truncate(trimmed_len);
+    }
+    let text = if follows_removed_url
+        && (destination.is_empty() || destination.ends_with([' ', '\t', '\r']))
+    {
+        text.trim_start_matches([' ', '\t', '\r'])
+    } else {
+        text
+    };
+
+    destination.push_str(text);
+}
+
+fn is_tco_url_boundary_punctuation(character: char) -> bool {
+    character.is_ascii_punctuation() || matches!(character, '…' | '—' | '–' | '“' | '”' | '‘' | '’')
+}
+
+fn truncate_caption_for_metadata(caption: &str, metadata: &RichText) -> String {
+    let metadata_len = if metadata.text.is_empty() {
+        0
+    } else {
+        messages::utf16_len("\n\n") + messages::utf16_len(&metadata.text)
+    };
+    let maximum = messages::TELEGRAM_MEDIA_CAPTION_LIMIT.saturating_sub(metadata_len);
+    if messages::utf16_len(caption) <= maximum {
+        return caption.to_owned();
+    }
+    if maximum == 0 {
+        return String::new();
+    }
+
+    let mut truncated = String::new();
+    let prefix_maximum = maximum - messages::utf16_len("…");
+    for character in caption.chars() {
+        if messages::utf16_len(&truncated) + character.len_utf16() > prefix_maximum {
+            break;
+        }
+        truncated.push(character);
+    }
+    truncated.push('…');
+    truncated
 }
 
 async fn handle_new_video_post(
@@ -540,6 +662,160 @@ mod tests {
                 "https://www.reddit.com/r/test/comments/post-1/title/"
             );
         }
+    }
+
+    #[test]
+    fn x_status_uses_the_full_structured_description_as_its_caption() {
+        let link = Url::parse("https://x.com/example/status/123").unwrap();
+        let description = "First line 👋\nhttps://t.co/example\nA link https://example.com stays";
+
+        assert_eq!(
+            direct_video_caption(
+                true,
+                "uploader - shortened title",
+                Some(description),
+                &RichText {
+                    text: link.to_string(),
+                    entities: Vec::new(),
+                },
+            ),
+            "First line 👋\nA link https://example.com stays"
+        );
+    }
+
+    #[test]
+    fn x_status_removes_all_tco_urls_and_cleans_the_local_gaps() {
+        let description =
+            "Read https://t.co/abc123, then https://t.co/Def456!\n\nhttps://example.com/kept";
+
+        assert_eq!(
+            direct_video_caption(true, "title", Some(description), &RichText::default()),
+            "Read, then!\n\nhttps://example.com/kept"
+        );
+    }
+
+    #[test]
+    fn x_status_preserves_authored_whitespace_and_punctuation_outside_tco_urls() {
+        let description = "Two  spaces : https://t.co/abc123 next\nNo t.co  here\n";
+
+        assert_eq!(
+            direct_video_caption(true, "title", Some(description), &RichText::default()),
+            "Two  spaces : next\nNo t.co  here\n"
+        );
+    }
+
+    #[test]
+    fn x_status_keeps_quotes_unicode_punctuation_and_emoji_adjacent_to_tco_urls() {
+        let description =
+            "See \"https://t.co/abc123\" and https://t.co/Def456…now https://t.co/Ghi789🔥";
+
+        assert_eq!(
+            direct_video_caption(true, "title", Some(description), &RichText::default()),
+            "See \"\" and…now 🔥"
+        );
+    }
+
+    #[test]
+    fn x_review_keeps_the_source_url_on_a_blank_separate_line() {
+        let metadata = RichText {
+            text: "https://x.com/example/status/123".to_owned(),
+            entities: Vec::new(),
+        };
+        let caption = direct_video_caption(
+            true,
+            "title",
+            Some("Tweet body https://t.co/abc123"),
+            &metadata,
+        );
+
+        assert_eq!(
+            messages::compose_review_text(
+                &RichText {
+                    text: caption,
+                    entities: Vec::new(),
+                },
+                &metadata,
+            )
+            .text,
+            "Tweet body\n\nhttps://x.com/example/status/123"
+        );
+    }
+
+    #[test]
+    fn x_status_with_only_tco_urls_has_no_repost_caption() {
+        assert_eq!(
+            direct_video_caption(
+                true,
+                "uploader - title",
+                Some("https://t.co/abc123\nhttps://t.co/Def456"),
+                &RichText::default(),
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn x_status_without_a_description_falls_back_to_its_title() {
+        assert_eq!(
+            direct_video_caption(
+                true,
+                "uploader - shortened title",
+                Some(" \n\t"),
+                &RichText::default(),
+            ),
+            "uploader - shortened title"
+        );
+    }
+
+    #[test]
+    fn x_status_with_an_overlong_utf16_description_is_truncated_with_room_for_metadata() {
+        let metadata = RichText {
+            text: "https://x.com/example/status/123".to_owned(),
+            entities: Vec::new(),
+        };
+        let description = format!(
+            "https://t.co/abc123\n{}",
+            "👋".repeat(messages::TELEGRAM_MEDIA_CAPTION_LIMIT / 2)
+        );
+        let caption = direct_video_caption(
+            true,
+            "uploader - short title",
+            Some(&description),
+            &metadata,
+        );
+
+        assert!(caption.ends_with('…'));
+        assert!(!caption.contains("t.co"));
+        assert!(
+            caption
+                .chars()
+                .all(|character| character == '👋' || character == '…')
+        );
+        assert!(
+            messages::utf16_len(
+                &messages::compose_review_text(
+                    &RichText {
+                        text: caption,
+                        entities: Vec::new(),
+                    },
+                    &metadata,
+                )
+                .text
+            ) <= messages::TELEGRAM_MEDIA_CAPTION_LIMIT
+        );
+    }
+
+    #[test]
+    fn non_x_direct_video_keeps_its_title_caption() {
+        assert_eq!(
+            direct_video_caption(
+                false,
+                "video title",
+                Some("extractor description"),
+                &RichText::default(),
+            ),
+            "video title"
+        );
     }
 
     /// Which variant of `DeliveredMessages` a given `PostType` produces.
