@@ -3,7 +3,10 @@ use crate::{
     handle_post::{DeliveredMessages, handle_new_post, handle_video_link, process_post},
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
-    types::{RepostAction, SubscriptionArgs, decode_repost_callback},
+    types::{
+        PublishVariant, RepostAction, ReviewContentKind, ReviewPost, RichText, SubscriptionArgs,
+        decode_repost_callback,
+    },
 };
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -17,53 +20,26 @@ use teloxide::{
     dptree,
     prelude::*,
     types::{
-        CallbackQuery, ChatId, FileId, ForceReply, InputFile, InputMedia, InputMediaPhoto, Message,
-        MessageId, Update,
+        CallbackQuery, ChatId, FileId, ForceReply, InlineKeyboardMarkup, InputFile, InputMedia,
+        InputMediaPhoto, Message, MessageEntity, MessageEntityKind, MessageEntityRef, MessageId,
+        Update,
     },
     utils::command::{BotCommands, ParseError},
 };
 use url::Url;
 
 const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
-const MAX_REPOST_CAPTION_CHARS: usize = 1024;
-
 type CaptionEditStore = Arc<Mutex<HashMap<i64, CaptionEditState>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CaptionEditState {
-    AwaitingInput {
-        post_id: String,
-        is_gallery: bool,
-        source_message_id: MessageId,
-        prompt_message_id: MessageId,
-    },
-    AwaitingConfirmation {
-        post_id: String,
-        is_gallery: bool,
-        source_message_id: MessageId,
-        preview_message_id: MessageId,
-        caption: String,
-    },
+struct CaptionEditState {
+    post_id: String,
+    prompt_message_id: MessageId,
 }
 
 impl CaptionEditState {
     fn post_id(&self) -> &str {
-        match self {
-            Self::AwaitingInput { post_id, .. } | Self::AwaitingConfirmation { post_id, .. } => {
-                post_id
-            }
-        }
-    }
-
-    fn interactive_message_id(&self) -> MessageId {
-        match self {
-            Self::AwaitingInput {
-                prompt_message_id, ..
-            } => *prompt_message_id,
-            Self::AwaitingConfirmation {
-                preview_message_id, ..
-            } => *preview_message_id,
-        }
+        &self.post_id
     }
 }
 
@@ -174,13 +150,65 @@ impl MyBot {
     }
 }
 
-async fn mark_edit_cancelled(tg: &Bot, chat_id: ChatId, state: CaptionEditState) {
-    if let Err(err) = tg
-        .edit_message_text(chat_id, state.interactive_message_id(), "Cancelled")
-        .await
-    {
-        warn!("failed to mark caption edit as cancelled: {err}");
+async fn delete_edit_prompt(tg: &Bot, chat_id: ChatId, state: &CaptionEditState) {
+    if let Err(err) = tg.delete_message(chat_id, state.prompt_message_id).await {
+        warn!("failed to delete caption edit prompt: {err}");
     }
+}
+
+async fn edit_review_content(tg: &Bot, review: &ReviewPost) -> Result<()> {
+    let content = messages::compose_review_text(&review.caption, &review.metadata);
+    let chat_id = ChatId(review.chat_id);
+    let confirmation = review
+        .pending_publish_variant
+        .map(messages::format_publish_confirmation_buttons);
+    if review.content_kind == ReviewContentKind::Text
+        || (review.content_kind == ReviewContentKind::Gallery
+            && review.review_message_id == review.control_message_id)
+    {
+        let request = tg
+            .edit_message_text(chat_id, review.review_message_id, content.text)
+            .entities(content.entities);
+        if review.review_message_id == review.control_message_id {
+            request
+                .reply_markup(confirmation.unwrap_or_default())
+                .await?;
+        } else {
+            request.await?;
+        }
+    } else {
+        let request = tg
+            .edit_message_caption(chat_id, review.review_message_id)
+            .caption(content.text)
+            .caption_entities(content.entities);
+        if review.review_message_id == review.control_message_id {
+            request
+                .reply_markup(confirmation.unwrap_or_default())
+                .await?;
+        } else {
+            request.await?;
+        }
+    }
+    Ok(())
+}
+
+async fn restore_review_keyboard(tg: &Bot, review: &ReviewPost) -> Result<()> {
+    let keyboard = review
+        .previous_keyboard
+        .clone()
+        .unwrap_or_else(|| match review.content_kind {
+            ReviewContentKind::Media | ReviewContentKind::Gallery => {
+                messages::format_media_repost_buttons_for_id(
+                    &review.post_id,
+                    review.content_kind == ReviewContentKind::Gallery,
+                )
+            }
+            ReviewContentKind::Text => messages::format_text_repost_buttons_for_id(&review.post_id),
+        });
+    tg.edit_message_reply_markup(ChatId(review.chat_id), review.control_message_id)
+        .reply_markup(keyboard)
+        .await?;
+    Ok(())
 }
 
 fn take_caption_edit(
@@ -209,30 +237,24 @@ fn take_caption_edit_for_post(
     }
 }
 
-fn take_caption_confirmation(
+async fn cancel_caption_edit(
     caption_edits: &CaptionEditStore,
+    tg: &Bot,
+    db: &db::Database,
     chat_id: ChatId,
-    preview_message_id: MessageId,
-) -> Option<CaptionEditState> {
-    let mut edits = caption_edits.lock().expect("caption edit store poisoned");
-    if matches!(
-        edits.get(&chat_id.0),
-        Some(CaptionEditState::AwaitingConfirmation {
-            preview_message_id: active_preview,
-            ..
-        }) if *active_preview == preview_message_id
-    ) {
-        edits.remove(&chat_id.0)
-    } else {
-        None
-    }
-}
-
-async fn cancel_caption_edit(caption_edits: &CaptionEditStore, tg: &Bot, chat_id: ChatId) -> bool {
+) -> bool {
     let Some(state) = take_caption_edit(caption_edits, chat_id) else {
         return false;
     };
-    mark_edit_cancelled(tg, chat_id, state).await;
+    delete_edit_prompt(tg, chat_id, &state).await;
+    if let Ok(Some(review)) = db.get_review_post(chat_id.0, state.post_id()) {
+        if let Err(err) = restore_review_keyboard(tg, &review).await {
+            warn!("failed to restore review keyboard: {err:#}");
+        }
+        if let Err(err) = db.clear_review_publish(chat_id.0, state.post_id()) {
+            warn!("failed to clear review publish state: {err:#}");
+        }
+    }
     true
 }
 
@@ -240,14 +262,14 @@ async fn cancel_caption_edit(caption_edits: &CaptionEditStore, tg: &Bot, chat_id
 enum CaptionInput<'a> {
     Valid(&'a str),
     Blank,
-    TooLong,
+    TooLong { maximum: usize },
 }
 
-fn validate_caption_input(text: &str) -> CaptionInput<'_> {
+fn validate_caption_input(text: &str, maximum: usize) -> CaptionInput<'_> {
     if text.trim().is_empty() {
         CaptionInput::Blank
-    } else if text.encode_utf16().count() > MAX_REPOST_CAPTION_CHARS {
-        CaptionInput::TooLong
+    } else if messages::utf16_len(text) > maximum {
+        CaptionInput::TooLong { maximum }
     } else {
         CaptionInput::Valid(text)
     }
@@ -256,6 +278,7 @@ fn validate_caption_input(text: &str) -> CaptionInput<'_> {
 async fn handle_caption_input(
     message: &Message,
     tg: &Bot,
+    config: &config::Config,
     caption_edits: &CaptionEditStore,
 ) -> Result<bool> {
     let chat_id = message.chat.id;
@@ -265,26 +288,29 @@ async fn handle_caption_input(
         .expect("caption edit store poisoned")
         .get(&chat_id.0)
         .cloned();
-    let Some(CaptionEditState::AwaitingInput {
-        post_id,
-        is_gallery,
-        source_message_id,
-        prompt_message_id,
-    }) = state
-    else {
+    let Some(state) = state else {
         return Ok(false);
     };
+    let post_id = state.post_id.clone();
+    let prompt_message_id = state.prompt_message_id;
     if reply_to != Some(prompt_message_id) {
         return Ok(false);
     }
 
     let Some(text) = message.text() else {
-        tg.send_message(chat_id, "Send the Repost Caption as plain text.")
+        tg.send_message(chat_id, "Send the Repost Caption as a text reply.")
             .reply_to(prompt_message_id)
             .await?;
         return Ok(true);
     };
-    let caption = match validate_caption_input(text) {
+    let db = db::Database::open(config)?;
+    let review = db
+        .get_review_post(chat_id.0, &post_id)?
+        .context("review post is unavailable")?;
+    let maximum =
+        messages::max_repost_caption_len(review.content_kind, &review.metadata, &review.source_url)
+            .context("review metadata or source URL exceeds Telegram's message limit")?;
+    let caption = match validate_caption_input(text, maximum) {
         CaptionInput::Valid(caption) => caption,
         CaptionInput::Blank => {
             tg.send_message(
@@ -295,12 +321,10 @@ async fn handle_caption_input(
             .await?;
             return Ok(true);
         }
-        CaptionInput::TooLong => {
+        CaptionInput::TooLong { maximum } => {
             tg.send_message(
                 chat_id,
-                format!(
-                    "The Repost Caption must be at most {MAX_REPOST_CAPTION_CHARS} characters."
-                ),
+                format!("The Repost Caption must be at most {maximum} UTF-16 units."),
             )
             .reply_to(prompt_message_id)
             .await?;
@@ -308,37 +332,34 @@ async fn handle_caption_input(
         }
     };
 
-    let preview = tg
-        .send_message(chat_id, format!("Repost Caption preview:\n\n{caption}"))
-        .reply_markup(messages::format_caption_confirmation_buttons())
-        .await?;
+    let rich_caption = RichText {
+        text: caption.to_owned(),
+        entities: message.entities().unwrap_or_default().to_vec(),
+    };
+    messages::validate_entities(&rich_caption.text, &rich_caption.entities)
+        .context("invalid Telegram formatting in Repost Caption")?;
+
     let transitioned = {
-        let mut edits = caption_edits.lock().expect("caption edit store poisoned");
-        if matches!(
+        let edits = caption_edits.lock().expect("caption edit store poisoned");
+        matches!(
             edits.get(&chat_id.0),
-            Some(CaptionEditState::AwaitingInput {
-                prompt_message_id: active_prompt,
-                ..
-            }) if *active_prompt == prompt_message_id
-        ) {
-            edits.insert(
-                chat_id.0,
-                CaptionEditState::AwaitingConfirmation {
-                    post_id,
-                    is_gallery,
-                    source_message_id,
-                    preview_message_id: preview.id,
-                    caption: caption.to_owned(),
-                },
-            );
-            true
-        } else {
-            false
-        }
+            Some(active) if active.prompt_message_id == prompt_message_id
+        )
     };
     if !transitioned {
-        tg.edit_message_text(chat_id, preview.id, "Cancelled")
-            .await?;
+        return Ok(true);
+    }
+
+    db.update_review_caption(chat_id.0, &post_id, &rich_caption)?;
+    let mut review = review;
+    review.caption = rich_caption;
+    edit_review_content(tg, &review).await?;
+    take_caption_edit_for_post(caption_edits, chat_id, &post_id);
+    if let Err(err) = tg.delete_message(chat_id, prompt_message_id).await {
+        warn!("failed to delete completed caption prompt: {err}");
+    }
+    if let Err(err) = tg.delete_message(chat_id, message.id).await {
+        warn!("failed to delete completed caption reply: {err}");
     }
     Ok(true)
 }
@@ -355,6 +376,11 @@ async fn handle_no_command(
         }
 
         let text = message.text().context("No text in message")?;
+
+        if let Some(reply) = malformed_command_reply(text) {
+            tg.send_message(message.chat.id, reply).await?;
+            return Ok(());
+        }
 
         let db = db::Database::open(config)?;
         if let Some(link) = parse_twitter_status_url(text) {
@@ -377,7 +403,7 @@ async fn handle_no_command(
 
         Ok(())
     }
-    if handle_caption_input(&message, &tg, &caption_edits).await? {
+    if handle_caption_input(&message, &tg, &config, &caption_edits).await? {
         return Ok(());
     }
     if let Err(err) = handle(&message, &tg, &config).await {
@@ -479,7 +505,7 @@ async fn handle_command(
                 handle_repost(db, message.chat.id, tg, message_id, button_data).await?;
             }
             Command::Cancel => {
-                if !cancel_caption_edit(caption_edits, tg, message.chat.id).await {
+                if !cancel_caption_edit(caption_edits, tg, &db, message.chat.id).await {
                     tg.send_message(message.chat.id, "No caption edit is active.")
                         .await?;
                 }
@@ -505,18 +531,32 @@ async fn handle_repost(
     message_id: i32,
     caption: Option<String>,
 ) -> Result<()> {
+    let caption = caption.map(|text| RichText {
+        text,
+        entities: Vec::new(),
+    });
+    handle_repost_media(db, chat_id, tg, MessageId(message_id), caption.as_ref()).await
+}
+
+fn repost_channel_id(db: &db::Database, chat_id: ChatId) -> Result<ChatId> {
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
-        tg.send_message(chat_id, "Repost channel not registered".to_string())
-            .await?;
-        return Ok(());
+        anyhow::bail!("Repost channel not registered");
     };
-    let caption = if let Some(caption) = &caption {
-        caption
-    } else {
-        ""
-    };
-    tg.copy_message(ChatId(repost_channel_id), chat_id, MessageId(message_id))
-        .caption(caption)
+    Ok(ChatId(repost_channel_id))
+}
+
+async fn handle_repost_media(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    message_id: MessageId,
+    caption: Option<&RichText>,
+) -> Result<()> {
+    let repost_channel_id = repost_channel_id(&db, chat_id)?;
+    let caption = caption.cloned().unwrap_or_default();
+    tg.copy_message(repost_channel_id, chat_id, message_id)
+        .caption(caption.text)
+        .caption_entities(caption.entities)
         .send()
         .await?;
     Ok(())
@@ -527,7 +567,7 @@ async fn handle_repost_gallery(
     chat_id: ChatId,
     tg: &Bot,
     gallery_file_ids: Vec<FileId>,
-    post_caption: Option<String>,
+    post_caption: Option<&RichText>,
 ) -> Result<()> {
     let mut media_group = vec![];
     let mut first = true;
@@ -536,8 +576,10 @@ async fn handle_repost_gallery(
         let mut input_media_photo = InputMediaPhoto::new(InputFile::file_id(file_id));
         // The first media item carries the caption for the whole gallery.
         if first {
-            if let Some(caption) = &post_caption {
-                input_media_photo = input_media_photo.caption(caption);
+            if let Some(caption) = post_caption {
+                input_media_photo = input_media_photo
+                    .caption(&caption.text)
+                    .caption_entities(caption.entities.clone());
             }
             first = false;
         }
@@ -545,13 +587,21 @@ async fn handle_repost_gallery(
         media_group.push(InputMedia::Photo(input_media_photo))
     }
 
-    let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
-        tg.send_message(chat_id, "Repost channel not registered".to_string())
-            .await?;
-        return Ok(());
-    };
+    let repost_channel_id = repost_channel_id(&db, chat_id)?;
 
-    tg.send_media_group(ChatId(repost_channel_id), media_group)
+    tg.send_media_group(repost_channel_id, media_group).await?;
+    Ok(())
+}
+
+async fn handle_repost_text(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    content: &RichText,
+) -> Result<()> {
+    let repost_channel_id = repost_channel_id(&db, chat_id)?;
+    tg.send_message(repost_channel_id, &content.text)
+        .entities(content.entities.clone())
         .await?;
     Ok(())
 }
@@ -592,13 +642,41 @@ pub async fn handle_repost_with_caption(
     delivered: &DeliveredMessages,
     caption: Option<String>,
 ) -> Result<()> {
+    let caption = caption.map(|text| RichText {
+        text,
+        entities: Vec::new(),
+    });
+    handle_repost_with_rich_caption(db, chat_id, tg, post, delivered, caption).await
+}
+
+/// Direct-invocation seam for reposting with an explicit rich-text caption.
+#[doc(hidden)]
+pub async fn handle_repost_with_rich_caption(
+    db: db::Database,
+    chat_id: ChatId,
+    tg: &Bot,
+    post: &reddit::Post,
+    delivered: &DeliveredMessages,
+    caption: Option<RichText>,
+) -> Result<()> {
     match delivered {
         DeliveredMessages::Single(message_id) => {
-            handle_repost(db, chat_id, tg, message_id.0, caption).await
+            if matches!(
+                post.post_type,
+                PostType::Link | PostType::SelfText | PostType::Unknown
+            ) {
+                let content = caption.unwrap_or_else(|| RichText {
+                    text: post.title.clone(),
+                    entities: Vec::new(),
+                });
+                handle_repost_text(db, chat_id, tg, &content).await
+            } else {
+                handle_repost_media(db, chat_id, tg, *message_id, caption.as_ref()).await
+            }
         }
         DeliveredMessages::Gallery(_) => {
             let tg_file_ids = db.get_telegram_files_for_post(&post.id, chat_id.0)?;
-            handle_repost_gallery(db, chat_id, tg, tg_file_ids, caption).await
+            handle_repost_gallery(db, chat_id, tg, tg_file_ids, caption.as_ref()).await
         }
     }
 }
@@ -699,6 +777,224 @@ fn parse_subscribe_message(input: String) -> Result<(SubscriptionArgs,), ParseEr
     Ok((args,))
 }
 
+fn malformed_command_reply(input: &str) -> Option<&'static str> {
+    let command = input.split_whitespace().next()?.strip_prefix('/')?;
+    let command = command.split('@').next()?.to_ascii_lowercase();
+
+    match command.as_str() {
+        "registerchannel" => {
+            Some("Usage: /registerchannel <channel_id>\n\nExample: /registerchannel -1001234567890")
+        }
+        "reposttochannel" => Some(
+            "Usage: /reposttochannel <message_id> <caption>\n\nExample: /reposttochannel 42 My repost caption",
+        ),
+        "sub" => Some(
+            "Usage: /sub <subreddit> [limit=<number>] [time=<period>] [filter=<type>]\n\nExample: /sub rust limit=5 time=week",
+        ),
+        "get" => Some(
+            "Usage: /get <subreddit> [limit=<number>] [time=<period>] [filter=<type>]\n\nExample: /get rust limit=5 time=week",
+        ),
+        "unsub" => Some("Usage: /unsub <subreddit>\n\nExample: /unsub rust"),
+        "help" | "listsubs" | "cancel" => Some("This command does not accept arguments."),
+        _ => Some("Unknown command. Send /help to see the available commands."),
+    }
+}
+
+fn legacy_source_url(message: &Message) -> String {
+    let Some(text) = message.text().or_else(|| message.caption()) else {
+        return String::new();
+    };
+    let entities = message
+        .entities()
+        .or_else(|| message.caption_entities())
+        .unwrap_or_default();
+    source_url_from_rich_text(text, entities)
+}
+
+fn source_url_from_rich_text(text: &str, entities: &[MessageEntity]) -> String {
+    MessageEntityRef::parse(text, entities)
+        .iter()
+        .find_map(|entity| match entity.kind() {
+            MessageEntityKind::TextLink { url } => Some(url.to_string()),
+            MessageEntityKind::Url => Some(entity.text().to_owned()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn legacy_review_metadata(message: &Message, caption: &str) -> RichText {
+    let Some(text) = message.text().or_else(|| message.caption()) else {
+        return RichText::default();
+    };
+    let Some(suffix) = text.strip_prefix(caption) else {
+        return RichText::default();
+    };
+    let (separator, metadata_text) = if let Some(metadata) = suffix.strip_prefix("\n\n") {
+        ("\n\n", metadata)
+    } else if let Some(metadata) = suffix.strip_prefix('\n') {
+        ("\n", metadata)
+    } else {
+        return RichText::default();
+    };
+    let offset = messages::utf16_len(caption) + messages::utf16_len(separator);
+    let entities = message
+        .entities()
+        .or_else(|| message.caption_entities())
+        .unwrap_or_default()
+        .iter()
+        .filter(|entity| entity.offset >= offset)
+        .cloned()
+        .map(|mut entity| {
+            entity.offset -= offset;
+            entity
+        })
+        .collect();
+    RichText {
+        text: metadata_text.to_owned(),
+        entities,
+    }
+}
+
+fn legacy_review_caption(message: &Message) -> RichText {
+    let text = message
+        .text()
+        .or_else(|| message.caption())
+        .unwrap_or_default();
+    let caption_text = text
+        .split_once("\n\n")
+        .or_else(|| text.split_once('\n'))
+        .map_or(text, |(caption, _)| caption);
+    let caption_len = messages::utf16_len(caption_text);
+    let entities = message
+        .entities()
+        .or_else(|| message.caption_entities())
+        .unwrap_or_default()
+        .iter()
+        .filter(|entity| entity.offset + entity.length <= caption_len)
+        .cloned()
+        .collect();
+    RichText {
+        text: caption_text.to_owned(),
+        entities,
+    }
+}
+
+fn bootstrap_review_post(
+    db: &db::Database,
+    message: &Message,
+    post_id: &str,
+) -> Result<ReviewPost> {
+    let chat_id = message.chat.id.0;
+    let caption = legacy_review_caption(message);
+    let metadata = legacy_review_metadata(message, &caption.text);
+    let content_kind = if message.text().is_some() {
+        ReviewContentKind::Text
+    } else {
+        ReviewContentKind::Media
+    };
+    let review = ReviewPost {
+        chat_id,
+        post_id: post_id.to_owned(),
+        source_url: legacy_source_url(message),
+        caption,
+        content_kind,
+        review_message_id: message.id,
+        control_message_id: message.id,
+        metadata,
+        pending_publish_variant: None,
+        previous_keyboard: None,
+        published_at: None,
+    };
+    db.upsert_review_post(&review)?;
+    Ok(review)
+}
+
+async fn select_publish_variant(
+    db: &db::Database,
+    tg: &Bot,
+    caption_edits: &CaptionEditStore,
+    message: &Message,
+    post_id: &str,
+    is_gallery: bool,
+    variant: PublishVariant,
+) -> Result<bool> {
+    let chat_id = message.chat.id;
+    if let Some(previous) = take_caption_edit(caption_edits, chat_id) {
+        delete_edit_prompt(tg, chat_id, &previous).await;
+        if let Some(previous_review) = db.get_review_post(chat_id.0, previous.post_id())? {
+            restore_review_keyboard(tg, &previous_review).await?;
+            db.clear_review_publish(chat_id.0, previous.post_id())?;
+        }
+    }
+
+    let review = match db.get_review_post(chat_id.0, post_id)? {
+        Some(review) => review,
+        None if is_gallery => return Ok(false),
+        None => bootstrap_review_post(db, message, post_id)?,
+    };
+    let previous_keyboard = message.reply_markup();
+    db.begin_review_publish(chat_id.0, post_id, variant, previous_keyboard)?;
+    tg.edit_message_reply_markup(chat_id, review.control_message_id)
+        .reply_markup(messages::format_publish_confirmation_buttons(variant))
+        .await?;
+
+    if variant != PublishVariant::WithoutCaption {
+        let prompt = tg
+            .send_message(
+                chat_id,
+                format!(
+                    "Reply with a replacement Repost Caption, or confirm the current caption unchanged.\n\nCurrent caption:\n{}",
+                    review.caption.text
+                ),
+            )
+            .reply_markup(
+                ForceReply::new()
+                    .input_field_placeholder(Some("Enter the Repost Caption".to_owned())),
+            )
+            .await?;
+        caption_edits
+            .lock()
+            .expect("caption edit store poisoned")
+            .insert(
+                chat_id.0,
+                CaptionEditState {
+                    post_id: post_id.to_owned(),
+                    prompt_message_id: prompt.id,
+                },
+            );
+    }
+    Ok(true)
+}
+
+async fn publish_review(config: &config::Config, tg: &Bot, review: &ReviewPost) -> Result<()> {
+    let variant = review
+        .pending_publish_variant
+        .context("no publish variant is selected")?;
+    let content = match variant {
+        PublishVariant::Caption => Some(review.caption.clone()),
+        PublishVariant::WithoutCaption => None,
+        PublishVariant::WithLink => Some(messages::append_source_url(
+            &review.caption,
+            &review.source_url,
+        )),
+    };
+    let db = db::Database::open(config)?;
+    let chat_id = ChatId(review.chat_id);
+    match review.content_kind {
+        ReviewContentKind::Media => {
+            handle_repost_media(db, chat_id, tg, review.review_message_id, content.as_ref()).await
+        }
+        ReviewContentKind::Gallery => {
+            let file_ids = db.get_telegram_files_for_post(&review.post_id, review.chat_id)?;
+            handle_repost_gallery(db, chat_id, tg, file_ids, content.as_ref()).await
+        }
+        ReviewContentKind::Text => {
+            let content = content.context("text review cannot be published without content")?;
+            handle_repost_text(db, chat_id, tg, &content).await
+        }
+    }
+}
+
 async fn callback_handler(
     q: CallbackQuery,
     config: Arc<config::Config>,
@@ -706,121 +1002,107 @@ async fn callback_handler(
     caption_edits: CaptionEditStore,
 ) -> Result<()> {
     let db = db::Database::open(&config)?;
-    let msg = q.message.context("callback message is unavailable")?;
-    let data = decode_repost_callback(q.data.as_deref().context("callback data is missing")?)?;
-    let chat_id = msg.chat().id;
-    let msg_id = if let Some(reply_id) = msg
+    let callback_message = q.message.context("callback message is unavailable")?;
+    let message = callback_message
         .regular_message()
-        .and_then(|x| x.reply_to_message())
-        .map(|x| x.id)
-    {
-        reply_id
-    } else {
-        msg.id()
-    };
+        .context("callback message is inaccessible")?;
+    let data = decode_repost_callback(q.data.as_deref().context("callback data is missing")?)?;
+    let chat_id = message.chat.id;
 
     match data.action {
-        RepostAction::Post | RepostAction::PostWithoutCaption => {
-            tg.answer_callback_query(q.id).await?;
+        RepostAction::Post
+        | RepostAction::PostWithoutCaption
+        | RepostAction::PostWithLink
+        | RepostAction::EditCaption => {
             let post_id = data.post_id.context("repost callback has no post id")?;
-            let previous = take_caption_edit_for_post(&caption_edits, chat_id, &post_id);
-            if let Some(previous) = previous {
-                mark_edit_cancelled(&tg, chat_id, previous).await;
-            }
-
-            let caption = if data.action == RepostAction::Post {
-                Some(db.get_post_title(chat_id.0, &post_id)?)
-            } else {
-                None
+            let variant = match data.action {
+                RepostAction::Post | RepostAction::EditCaption => PublishVariant::Caption,
+                RepostAction::PostWithoutCaption => PublishVariant::WithoutCaption,
+                RepostAction::PostWithLink => PublishVariant::WithLink,
+                _ => unreachable!(),
             };
-            if data.is_gallery {
-                let file_ids = db.get_telegram_files_for_post(&post_id, chat_id.0)?;
-                handle_repost_gallery(db, chat_id, &tg, file_ids, caption)
-                    .await
-                    .context("Failed handling gallery repost")?;
+            let selected = select_publish_variant(
+                &db,
+                &tg,
+                &caption_edits,
+                message,
+                &post_id,
+                data.is_gallery,
+                variant,
+            )
+            .await?;
+            let answer = tg.answer_callback_query(q.id);
+            if selected {
+                answer.await?;
             } else {
-                handle_repost(db, chat_id, &tg, msg_id.0, caption)
-                    .await
-                    .context("Failed handling repost")?;
-            }
-        }
-        RepostAction::EditCaption => {
-            tg.answer_callback_query(q.id).await?;
-            let post_id = data.post_id.context("edit callback has no post id")?;
-            if let Some(previous) = take_caption_edit(&caption_edits, chat_id) {
-                mark_edit_cancelled(&tg, chat_id, previous).await;
-            }
-            let current_caption = db.get_post_title(chat_id.0, &post_id)?;
-            let prompt = tg
-                .send_message(
-                    chat_id,
-                    format!(
-                        "Reply with the complete replacement Repost Caption.\n\nCurrent caption:\n{current_caption}"
-                    ),
-                )
-                .reply_markup(
-                    ForceReply::new()
-                        .input_field_placeholder(Some("Enter the Repost Caption".to_owned())),
-                )
-                .await?;
-            caption_edits
-                .lock()
-                .expect("caption edit store poisoned")
-                .insert(
-                    chat_id.0,
-                    CaptionEditState::AwaitingInput {
-                        post_id,
-                        is_gallery: data.is_gallery,
-                        source_message_id: msg_id,
-                        prompt_message_id: prompt.id,
-                    },
-                );
-        }
-        RepostAction::PublishCaption => {
-            let state = take_caption_confirmation(&caption_edits, chat_id, msg.id());
-            let Some(CaptionEditState::AwaitingConfirmation {
-                post_id,
-                is_gallery,
-                source_message_id,
-                preview_message_id,
-                caption,
-            }) = state
-            else {
-                tg.answer_callback_query(q.id)
-                    .text("This caption edit is no longer active.")
+                answer
+                    .text("This older gallery is unavailable in the local database.")
                     .await?;
-                return Ok(());
-            };
-            tg.answer_callback_query(q.id).await?;
-
-            let publish_result: Result<()> = async {
-                if is_gallery {
-                    let file_ids = db.get_telegram_files_for_post(&post_id, chat_id.0)?;
-                    handle_repost_gallery(db, chat_id, &tg, file_ids, Some(caption)).await
+            }
+        }
+        RepostAction::ConfirmPublish => {
+            let review = db
+                .get_review_post_by_control_message(chat_id.0, message.id)?
+                .context("review confirmation is no longer active")?;
+            if !db.claim_review_publish(chat_id.0, &review.post_id)? {
+                if review.published_at.is_some() {
+                    tg.edit_message_reply_markup(chat_id, review.control_message_id)
+                        .reply_markup(InlineKeyboardMarkup::default())
+                        .await?;
+                    tg.answer_callback_query(q.id).text("Published").await?;
                 } else {
-                    handle_repost(db, chat_id, &tg, source_message_id.0, Some(caption)).await
+                    tg.answer_callback_query(q.id)
+                        .text("This publication is already being handled.")
+                        .await?;
+                }
+                return Ok(());
+            }
+            if let Some(edit) = take_caption_edit_for_post(&caption_edits, chat_id, &review.post_id)
+            {
+                delete_edit_prompt(&tg, chat_id, &edit).await;
+            }
+            match publish_review(&config, &tg, &review).await {
+                Ok(()) => {
+                    db.mark_review_published(chat_id.0, &review.post_id)?;
+                    tg.edit_message_reply_markup(chat_id, review.control_message_id)
+                        .reply_markup(InlineKeyboardMarkup::default())
+                        .await?;
+                    tg.answer_callback_query(q.id).text("Published").await?;
+                }
+                Err(err) => {
+                    restore_review_keyboard(&tg, &review).await?;
+                    db.clear_review_publish(chat_id.0, &review.post_id)?;
+                    tg.answer_callback_query(q.id)
+                        .text("Failed to publish")
+                        .await?;
+                    tg.send_message(chat_id, format!("Failed to publish: {err}"))
+                        .await?;
                 }
             }
-            .await;
-            let status = if publish_result.is_ok() {
-                "Published"
-            } else {
-                "Failed to publish"
-            };
-            tg.edit_message_text(chat_id, preview_message_id, status)
-                .await?;
-            publish_result?;
         }
-        RepostAction::CancelCaption => {
-            let state = take_caption_confirmation(&caption_edits, chat_id, msg.id());
-            if let Some(state) = state {
-                tg.answer_callback_query(q.id).await?;
-                mark_edit_cancelled(&tg, chat_id, state).await;
-            } else {
-                tg.answer_callback_query(q.id)
-                    .text("This caption edit is no longer active.")
+        RepostAction::CancelPublish => {
+            let review = db
+                .get_review_post_by_control_message(chat_id.0, message.id)?
+                .context("review confirmation is no longer active")?;
+            if review.published_at.is_some() {
+                tg.edit_message_reply_markup(chat_id, review.control_message_id)
+                    .reply_markup(InlineKeyboardMarkup::default())
                     .await?;
+                tg.answer_callback_query(q.id).text("Published").await?;
+                return Ok(());
             }
+            tg.answer_callback_query(q.id).await?;
+            if let Some(edit) = take_caption_edit_for_post(&caption_edits, chat_id, &review.post_id)
+            {
+                delete_edit_prompt(&tg, chat_id, &edit).await;
+            }
+            restore_review_keyboard(&tg, &review).await?;
+            db.clear_review_publish(chat_id.0, &review.post_id)?;
+        }
+        RepostAction::PublishCaption | RepostAction::CancelCaption => {
+            tg.answer_callback_query(q.id)
+                .text("This older caption preview is no longer active.")
+                .await?;
         }
     }
 
@@ -865,77 +1147,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_plain_text_caption_input() {
+    fn validates_caption_input_with_utf16_limit() {
+        const LIMIT: usize = 8;
         assert_eq!(
-            validate_caption_input("hello\nworld 👋"),
-            CaptionInput::Valid("hello\nworld 👋")
+            validate_caption_input("hello", LIMIT),
+            CaptionInput::Valid("hello")
         );
-        assert_eq!(validate_caption_input(""), CaptionInput::Blank);
-        assert_eq!(validate_caption_input(" \n\t"), CaptionInput::Blank);
-        let maximum = "a".repeat(MAX_REPOST_CAPTION_CHARS);
+        assert_eq!(validate_caption_input("", LIMIT), CaptionInput::Blank);
+        assert_eq!(validate_caption_input(" \n\t", LIMIT), CaptionInput::Blank);
+        let maximum = "a".repeat(LIMIT);
         assert_eq!(
-            validate_caption_input(&maximum),
+            validate_caption_input(&maximum, LIMIT),
             CaptionInput::Valid(&maximum)
         );
-        let too_long = "a".repeat(MAX_REPOST_CAPTION_CHARS + 1);
-        assert_eq!(validate_caption_input(&too_long), CaptionInput::TooLong);
-        let emoji_limit = "👋".repeat(MAX_REPOST_CAPTION_CHARS / 2);
+        let too_long = "a".repeat(LIMIT + 1);
         assert_eq!(
-            validate_caption_input(&emoji_limit),
+            validate_caption_input(&too_long, LIMIT),
+            CaptionInput::TooLong { maximum: LIMIT }
+        );
+        let emoji_limit = "👋".repeat(LIMIT / 2);
+        assert_eq!(
+            validate_caption_input(&emoji_limit, LIMIT),
             CaptionInput::Valid(&emoji_limit)
         );
         assert_eq!(
-            validate_caption_input(&format!("{emoji_limit}👋")),
-            CaptionInput::TooLong
+            validate_caption_input(&format!("{emoji_limit}👋"), LIMIT),
+            CaptionInput::TooLong { maximum: LIMIT }
         );
     }
 
     #[test]
-    fn caption_edit_state_identifies_post_and_interactive_message() {
-        let state = CaptionEditState::AwaitingConfirmation {
+    fn caption_edit_state_identifies_post() {
+        let state = CaptionEditState {
             post_id: "post-1".to_owned(),
-            is_gallery: false,
-            source_message_id: MessageId(10),
-            preview_message_id: MessageId(11),
-            caption: "replacement".to_owned(),
+            prompt_message_id: MessageId(11),
         };
 
         assert_eq!(state.post_id(), "post-1");
-        assert_eq!(state.interactive_message_id(), MessageId(11));
-    }
-
-    #[test]
-    fn confirmation_can_only_be_consumed_once_by_its_preview() {
-        let edits: CaptionEditStore = Arc::new(Mutex::new(HashMap::from([(
-            1,
-            CaptionEditState::AwaitingConfirmation {
-                post_id: "post-1".to_owned(),
-                is_gallery: false,
-                source_message_id: MessageId(10),
-                preview_message_id: MessageId(11),
-                caption: "replacement".to_owned(),
-            },
-        )])));
-
-        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(12)).is_none());
-        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(11)).is_some());
-        assert!(take_caption_confirmation(&edits, ChatId(1), MessageId(11)).is_none());
+        assert_eq!(state.prompt_message_id, MessageId(11));
     }
 
     #[test]
     fn direct_repost_only_consumes_an_edit_for_the_same_post() {
         let edits: CaptionEditStore = Arc::new(Mutex::new(HashMap::from([(
             1,
-            CaptionEditState::AwaitingInput {
+            CaptionEditState {
                 post_id: "post-1".to_owned(),
-                is_gallery: false,
-                source_message_id: MessageId(10),
                 prompt_message_id: MessageId(11),
             },
         )])));
 
         assert!(take_caption_edit_for_post(&edits, ChatId(1), "post-2").is_none());
         assert!(take_caption_edit_for_post(&edits, ChatId(1), "post-1").is_some());
+    }
+
+    #[test]
+    fn source_url_recovery_accepts_visible_and_legacy_links() {
+        let visible = "Source: https://example.com/video";
+        let visible_offset = messages::utf16_len("Source: ");
+        assert_eq!(
+            source_url_from_rich_text(
+                visible,
+                &[MessageEntity::new(
+                    MessageEntityKind::Url,
+                    visible_offset,
+                    messages::utf16_len("https://example.com/video"),
+                )],
+            ),
+            "https://example.com/video"
+        );
+
+        let hidden = "video link";
+        assert_eq!(
+            source_url_from_rich_text(
+                hidden,
+                &[MessageEntity::text_link(
+                    reqwest::Url::parse("https://example.com/legacy").unwrap(),
+                    0,
+                    messages::utf16_len(hidden),
+                )],
+            ),
+            "https://example.com/legacy"
+        );
     }
 
     #[test]
@@ -1026,6 +1319,31 @@ mod tests {
                 filter: None,
             },
         )
+    }
+
+    #[test]
+    fn malformed_commands_explain_required_arguments() {
+        assert_eq!(
+            malformed_command_reply("/registerchannel"),
+            Some(
+                "Usage: /registerchannel <channel_id>\n\nExample: /registerchannel -1001234567890"
+            )
+        );
+        assert_eq!(
+            malformed_command_reply("/reposttochannel@my_bot"),
+            Some(
+                "Usage: /reposttochannel <message_id> <caption>\n\nExample: /reposttochannel 42 My repost caption"
+            )
+        );
+    }
+
+    #[test]
+    fn unrecognized_slash_command_suggests_help() {
+        assert_eq!(
+            malformed_command_reply("/notacommand"),
+            Some("Unknown command. Send /help to see the available commands.")
+        );
+        assert_eq!(malformed_command_reply("plain text"), None);
     }
 
     #[test]

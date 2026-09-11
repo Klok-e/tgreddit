@@ -1,5 +1,11 @@
 use crate::reddit::{self};
-use crate::{config, db, download::*, messages, ytdlp};
+use crate::{
+    config, db,
+    download::*,
+    messages,
+    types::{ReviewContentKind, ReviewPost, RichText},
+    ytdlp,
+};
 use anyhow::{Context, Result};
 use log::*;
 use url::Url;
@@ -14,6 +20,20 @@ use teloxide::{
 };
 use teloxide::{prelude::*, types::InputMedia};
 use tempfile::TempDir;
+
+fn source_url_for_post(post: &reddit::Post) -> String {
+    match post.post_type {
+        reddit::PostType::Gallery | reddit::PostType::SelfText => post.format_permalink_url(None),
+        reddit::PostType::Image
+        | reddit::PostType::Video
+        | reddit::PostType::Link
+        | reddit::PostType::Unknown => post.url.clone(),
+    }
+}
+
+fn save_review_post(db: &db::Database, review: ReviewPost) -> Result<()> {
+    db.upsert_review_post(&review)
+}
 
 /// The Telegram message id(s) produced by a single `handle_new_post` delivery.
 ///
@@ -39,14 +59,36 @@ pub async fn handle_video_link(
     db.record_post_seen_with_current_time(chat_id, &video)?;
 
     info!("got a video: {video:?}");
-    let caption = messages::format_link_video_caption_html(&video);
-    tg.send_video(ChatId(chat_id), InputFile::file(&video.path))
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .caption(&caption)
+    let caption = RichText {
+        text: video.title.clone(),
+        entities: Vec::new(),
+    };
+    let metadata = messages::format_video_review_metadata(&video);
+    let review = messages::compose_review_text(&caption, &metadata);
+    let sent = tg
+        .send_video(ChatId(chat_id), InputFile::file(&video.path))
+        .caption(&review.text)
+        .caption_entities(review.entities.clone())
         .height(video.height.into())
         .width(video.width.into())
         .reply_markup(messages::format_media_repost_buttons(&video, false))
         .await?;
+    save_review_post(
+        db,
+        ReviewPost {
+            chat_id,
+            post_id: video.id.clone(),
+            source_url: video.url.clone(),
+            caption,
+            content_kind: ReviewContentKind::Media,
+            review_message_id: sent.id,
+            control_message_id: sent.id,
+            metadata,
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        },
+    )?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
         video.id
@@ -64,15 +106,40 @@ async fn handle_new_video_post(
         .context("Failed to download video from post")?;
 
     info!("got a video: {video:?}");
-    let caption = messages::format_media_caption_html(post, config.links_base_url.as_deref());
+    let source_url = source_url_for_post(post);
+    let caption = RichText {
+        text: post.title.clone(),
+        entities: Vec::new(),
+    };
+    let metadata = messages::format_reddit_review_metadata(
+        &post.format_permalink_url(config.links_base_url.as_deref()),
+    );
+    let review = messages::compose_review_text(&caption, &metadata);
     let sent = tg
         .send_video(ChatId(chat_id), InputFile::file(&video.path))
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .caption(&caption)
+        .caption(&review.text)
+        .caption_entities(review.entities.clone())
         .height(video.height.into())
         .width(video.width.into())
         .reply_markup(messages::format_media_repost_buttons(post, false))
         .await?;
+    let db = db::Database::open(config)?;
+    save_review_post(
+        &db,
+        ReviewPost {
+            chat_id,
+            post_id: post.id.clone(),
+            source_url,
+            caption,
+            content_kind: ReviewContentKind::Media,
+            review_message_id: sent.id,
+            control_message_id: sent.id,
+            metadata,
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        },
+    )?;
     info!(
         "video uploaded post_id={} chat_id={chat_id} video={video:?}",
         post.id
@@ -89,25 +156,68 @@ async fn handle_new_image_post(
     match download_url_to_tmp(&post.url).await {
         Ok((path, _tmp_dir)) => {
             // path will be deleted when _tmp_dir when goes out of scope
-            let caption =
-                messages::format_media_caption_html(post, config.links_base_url.as_deref());
+            let source_url = source_url_for_post(post);
+            let caption = RichText {
+                text: post.title.clone(),
+                entities: Vec::new(),
+            };
+            let metadata = messages::format_reddit_review_metadata(
+                &post.format_permalink_url(config.links_base_url.as_deref()),
+            );
+            let review = messages::compose_review_text(&caption, &metadata);
             if is_gif(&path) {
                 let sent = tg
                     .send_video(ChatId(chat_id), InputFile::file(path))
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .caption(&caption)
+                    .caption(&review.text)
+                    .caption_entities(review.entities.clone())
                     .reply_markup(messages::format_media_repost_buttons(post, false))
                     .await?;
+
+                let db = db::Database::open(config)?;
+                save_review_post(
+                    &db,
+                    ReviewPost {
+                        chat_id,
+                        post_id: post.id.clone(),
+                        source_url,
+                        caption,
+                        content_kind: ReviewContentKind::Media,
+                        review_message_id: sent.id,
+                        control_message_id: sent.id,
+                        metadata,
+                        pending_publish_variant: None,
+                        previous_keyboard: None,
+                        published_at: None,
+                    },
+                )?;
 
                 info!("gif uploaded post_id={} chat_id={chat_id}", post.id);
                 Ok(DeliveredMessages::Single(sent.id))
             } else {
                 let sent = tg
                     .send_photo(ChatId(chat_id), InputFile::file(path))
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .caption(&caption)
+                    .caption(&review.text)
+                    .caption_entities(review.entities.clone())
                     .reply_markup(messages::format_media_repost_buttons(post, false))
                     .await?;
+
+                let db = db::Database::open(config)?;
+                save_review_post(
+                    &db,
+                    ReviewPost {
+                        chat_id,
+                        post_id: post.id.clone(),
+                        source_url,
+                        caption,
+                        content_kind: ReviewContentKind::Media,
+                        review_message_id: sent.id,
+                        control_message_id: sent.id,
+                        metadata,
+                        pending_publish_variant: None,
+                        previous_keyboard: None,
+                        published_at: None,
+                    },
+                )?;
 
                 info!("image uploaded post_id={} chat_id={chat_id}", post.id);
                 Ok(DeliveredMessages::Single(sent.id))
@@ -126,12 +236,37 @@ async fn handle_new_link_post(
     chat_id: i64,
     post: &reddit::Post,
 ) -> Result<DeliveredMessages> {
-    let message_html = messages::format_link_message_html(post, config.links_base_url.as_deref());
+    let source_url = source_url_for_post(post);
+    let caption = RichText {
+        text: post.title.clone(),
+        entities: Vec::new(),
+    };
+    let metadata = messages::format_reddit_review_metadata(
+        &post.format_permalink_url(config.links_base_url.as_deref()),
+    );
+    let review = messages::compose_review_text(&caption, &metadata);
     let sent = tg
-        .send_message(ChatId(chat_id), message_html)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(messages::format_post_button(post))
+        .send_message(ChatId(chat_id), &review.text)
+        .entities(review.entities.clone())
+        .reply_markup(messages::format_text_repost_buttons(post))
         .await?;
+    let db = db::Database::open(config)?;
+    save_review_post(
+        &db,
+        ReviewPost {
+            chat_id,
+            post_id: post.id.clone(),
+            source_url,
+            caption,
+            content_kind: ReviewContentKind::Text,
+            review_message_id: sent.id,
+            control_message_id: sent.id,
+            metadata,
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        },
+    )?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(DeliveredMessages::Single(sent.id))
 }
@@ -142,12 +277,37 @@ async fn handle_new_self_post(
     chat_id: i64,
     post: &reddit::Post,
 ) -> Result<DeliveredMessages> {
-    let message_html = messages::format_media_caption_html(post, config.links_base_url.as_deref());
+    let source_url = source_url_for_post(post);
+    let caption = RichText {
+        text: post.title.clone(),
+        entities: Vec::new(),
+    };
+    let metadata = messages::format_reddit_review_metadata(
+        &post.format_permalink_url(config.links_base_url.as_deref()),
+    );
+    let review = messages::compose_review_text(&caption, &metadata);
     let sent = tg
-        .send_message(ChatId(chat_id), message_html)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(messages::format_post_button(post))
+        .send_message(ChatId(chat_id), &review.text)
+        .entities(review.entities.clone())
+        .reply_markup(messages::format_text_repost_buttons(post))
         .await?;
+    let db = db::Database::open(config)?;
+    save_review_post(
+        &db,
+        ReviewPost {
+            chat_id,
+            post_id: post.id.clone(),
+            source_url,
+            caption,
+            content_kind: ReviewContentKind::Text,
+            review_message_id: sent.id,
+            control_message_id: sent.id,
+            metadata,
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        },
+    )?;
     info!("message sent post_id={} chat_id={chat_id}", post.id);
     Ok(DeliveredMessages::Single(sent.id))
 }
@@ -186,6 +346,15 @@ async fn handle_new_gallery_post(
         .expect("expected media_metadata to exist in gallery post")
         .items;
     let gallery_files_map = download_gallery(post).await?;
+    let source_url = source_url_for_post(post);
+    let caption = RichText {
+        text: post.title.clone(),
+        entities: Vec::new(),
+    };
+    let metadata = messages::format_reddit_review_metadata(
+        &post.format_permalink_url(config.links_base_url.as_deref()),
+    );
+    let review = messages::compose_review_text(&caption, &metadata);
     let mut media_group = vec![];
     let mut first = true;
 
@@ -196,26 +365,18 @@ async fn handle_new_gallery_post(
                 if is_gif(image_path) {
                     let mut input_media_video = InputMediaVideo::new(InputFile::file(image_path));
                     if first {
-                        let caption = messages::format_media_caption_html(
-                            post,
-                            config.links_base_url.as_deref(),
-                        );
                         input_media_video = input_media_video
-                            .caption(&caption)
-                            .parse_mode(teloxide::types::ParseMode::Html);
+                            .caption(&review.text)
+                            .caption_entities(review.entities.clone());
                         first = false;
                     }
                     media_group.push(InputMedia::Video(input_media_video));
                 } else {
                     let mut input_media_photo = InputMediaPhoto::new(InputFile::file(image_path));
                     if first {
-                        let caption = messages::format_media_caption_html(
-                            post,
-                            config.links_base_url.as_deref(),
-                        );
                         input_media_photo = input_media_photo
-                            .caption(&caption)
-                            .parse_mode(teloxide::types::ParseMode::Html);
+                            .caption(&review.text)
+                            .caption_entities(review.entities.clone());
                         first = false;
                     }
                     media_group.push(InputMedia::Photo(input_media_photo));
@@ -245,10 +406,31 @@ async fn handle_new_gallery_post(
         db.add_telegram_file(&post.id, chat_id, &file_meta.id, &file_meta.unique_id)?;
     }
 
-    tg.send_message(ChatId(chat_id), "To repost:")
+    let control = tg
+        .send_message(ChatId(chat_id), "To repost:")
         .reply_markup(messages::format_media_repost_buttons(post, true))
         .send()
         .await?;
+
+    let review_message_id = *delivered_ids
+        .first()
+        .context("gallery delivery returned no messages")?;
+    save_review_post(
+        &db,
+        ReviewPost {
+            chat_id,
+            post_id: post.id.clone(),
+            source_url,
+            caption,
+            content_kind: ReviewContentKind::Gallery,
+            review_message_id,
+            control_message_id: control.id,
+            metadata,
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        },
+    )?;
 
     info!("gallery uploaded post_id={} chat_id={chat_id}", post.id);
 
@@ -323,6 +505,42 @@ fn is_gif(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn post(post_type: reddit::PostType) -> reddit::Post {
+        reddit::Post {
+            id: "post-1".to_owned(),
+            subreddit: "test".to_owned(),
+            title: "title".to_owned(),
+            permalink: "/r/test/comments/post-1/title/".to_owned(),
+            url: "https://media.example/file".to_owned(),
+            post_hint: None,
+            post_type,
+            gallery_data: None,
+            media_metadata: Some(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn source_url_mapping_uses_exact_media_url_and_reddit_permalink() {
+        for post_type in [
+            reddit::PostType::Image,
+            reddit::PostType::Video,
+            reddit::PostType::Link,
+            reddit::PostType::Unknown,
+        ] {
+            assert_eq!(
+                source_url_for_post(&post(post_type)),
+                "https://media.example/file"
+            );
+        }
+        for post_type in [reddit::PostType::Gallery, reddit::PostType::SelfText] {
+            assert_eq!(
+                source_url_for_post(&post(post_type)),
+                "https://www.reddit.com/r/test/comments/post-1/title/"
+            );
+        }
+    }
 
     /// Which variant of `DeliveredMessages` a given `PostType` produces.
     /// This mirrors the dispatch in `handle_new_post` and is the unit-testable

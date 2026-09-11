@@ -10,7 +10,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
 use std::{convert::TryFrom, sync::Mutex};
-use teloxide::types::{FileId, FileUniqueId};
+use teloxide::types::{FileId, FileUniqueId, InlineKeyboardMarkup, MessageId};
 
 const MIGRATIONS: &[&str] = &[
     "
@@ -133,6 +133,57 @@ const MIGRATIONS: &[&str] = &[
     ",
     "
     ALTER TABLE telegram_file_new RENAME TO telegram_file;
+    ",
+    "
+    create table review_post(
+        chat_id                       integer not null,
+        post_id                       text not null,
+        source_url                    text not null,
+        caption_text                  text not null,
+        caption_entities_json         text not null,
+        content_kind_json             text not null,
+        review_message_id             integer not null,
+        control_message_id            integer not null,
+        metadata_text                 text not null,
+        metadata_entities_json        text not null,
+        pending_publish_variant_json  text,
+        previous_keyboard_json        text,
+        publishing                    integer not null default 0 check (publishing in (0, 1)),
+        published_at                  text,
+        primary key (chat_id, post_id),
+        foreign key (post_id, chat_id) references post(post_id, chat_id),
+        unique (chat_id, control_message_id)
+    ) strict;
+    ",
+    "
+    create table review_post_new(
+        chat_id                       integer not null,
+        post_id                       text not null,
+        source_url                    text not null,
+        caption_text                  text not null,
+        caption_entities_json         text not null,
+        content_kind_json             text not null,
+        review_message_id             integer not null,
+        control_message_id            integer not null,
+        metadata_text                 text not null,
+        metadata_entities_json        text not null,
+        pending_publish_variant_json  text,
+        previous_keyboard_json        text,
+        publishing                    integer not null default 0 check (publishing in (0, 1)),
+        published_at                  text,
+        primary key (chat_id, post_id),
+        unique (chat_id, control_message_id)
+    ) strict;
+    ",
+    "
+    insert into review_post_new
+    select * from review_post;
+    ",
+    "
+    drop table review_post;
+    ",
+    "
+    alter table review_post_new rename to review_post;
     ",
 ];
 
@@ -483,6 +534,353 @@ impl Database {
         let telegram_files: Result<Vec<String>, _> = rows.collect();
         Ok(telegram_files?.into_iter().map(|x| x.into()).collect())
     }
+
+    pub fn upsert_review_post(&self, review: &ReviewPost) -> Result<()> {
+        let caption_entities_json = serde_json::to_string(&review.caption.entities)
+            .context("could not serialize review caption entities")?;
+        let content_kind_json = serde_json::to_string(&review.content_kind)
+            .context("could not serialize review content kind")?;
+        let metadata_entities_json = serde_json::to_string(&review.metadata.entities)
+            .context("could not serialize review metadata entities")?;
+        let pending_publish_variant_json = review
+            .pending_publish_variant
+            .map(|variant| serde_json::to_string(&variant))
+            .transpose()
+            .context("could not serialize pending publish variant")?;
+        let previous_keyboard_json = review
+            .previous_keyboard
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("could not serialize previous review keyboard")?;
+
+        let conn = self.conn.lock().expect("No poison");
+        conn.execute(
+            "
+            insert into review_post (
+                chat_id,
+                post_id,
+                source_url,
+                caption_text,
+                caption_entities_json,
+                content_kind_json,
+                review_message_id,
+                control_message_id,
+                metadata_text,
+                metadata_entities_json,
+                pending_publish_variant_json,
+                previous_keyboard_json,
+                published_at
+            ) values (
+                :chat_id,
+                :post_id,
+                :source_url,
+                :caption_text,
+                :caption_entities_json,
+                :content_kind_json,
+                :review_message_id,
+                :control_message_id,
+                :metadata_text,
+                :metadata_entities_json,
+                :pending_publish_variant_json,
+                :previous_keyboard_json,
+                :published_at
+            )
+            on conflict (chat_id, post_id) do update set
+                source_url = excluded.source_url,
+                caption_text = excluded.caption_text,
+                caption_entities_json = excluded.caption_entities_json,
+                content_kind_json = excluded.content_kind_json,
+                review_message_id = excluded.review_message_id,
+                control_message_id = excluded.control_message_id,
+                metadata_text = excluded.metadata_text,
+                metadata_entities_json = excluded.metadata_entities_json,
+                pending_publish_variant_json = excluded.pending_publish_variant_json,
+                previous_keyboard_json = excluded.previous_keyboard_json,
+                publishing = 0,
+                published_at = excluded.published_at
+            ",
+            named_params! {
+                ":chat_id": review.chat_id,
+                ":post_id": review.post_id,
+                ":source_url": review.source_url,
+                ":caption_text": review.caption.text,
+                ":caption_entities_json": caption_entities_json,
+                ":content_kind_json": content_kind_json,
+                ":review_message_id": review.review_message_id.0,
+                ":control_message_id": review.control_message_id.0,
+                ":metadata_text": review.metadata.text,
+                ":metadata_entities_json": metadata_entities_json,
+                ":pending_publish_variant_json": pending_publish_variant_json,
+                ":previous_keyboard_json": previous_keyboard_json,
+                ":published_at": review.published_at,
+            },
+        )
+        .context("could not save review post")?;
+        Ok(())
+    }
+
+    pub fn get_review_post(&self, chat_id: i64, post_id: &str) -> Result<Option<ReviewPost>> {
+        self.query_review_post(
+            "where chat_id = :chat_id and post_id = :post_id",
+            named_params! {
+                ":chat_id": chat_id,
+                ":post_id": post_id,
+            },
+        )
+    }
+
+    pub fn get_review_post_by_control_message(
+        &self,
+        chat_id: i64,
+        control_message_id: MessageId,
+    ) -> Result<Option<ReviewPost>> {
+        self.query_review_post(
+            "where chat_id = :chat_id and control_message_id = :control_message_id",
+            named_params! {
+                ":chat_id": chat_id,
+                ":control_message_id": control_message_id.0,
+            },
+        )
+    }
+
+    pub fn update_review_caption(
+        &self,
+        chat_id: i64,
+        post_id: &str,
+        caption: &RichText,
+    ) -> Result<()> {
+        let entities_json = serde_json::to_string(&caption.entities)
+            .context("could not serialize review caption entities")?;
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set caption_text = :caption_text,
+                    caption_entities_json = :caption_entities_json
+                where chat_id = :chat_id and post_id = :post_id
+                ",
+                named_params! {
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                    ":caption_text": caption.text,
+                    ":caption_entities_json": entities_json,
+                },
+            )
+            .context("could not update review caption")?;
+        anyhow::ensure!(changed == 1, "review post does not exist");
+        Ok(())
+    }
+
+    pub fn begin_review_publish(
+        &self,
+        chat_id: i64,
+        post_id: &str,
+        variant: PublishVariant,
+        previous_keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<()> {
+        let variant_json =
+            serde_json::to_string(&variant).context("could not serialize publish variant")?;
+        let previous_keyboard_json = previous_keyboard
+            .map(serde_json::to_string)
+            .transpose()
+            .context("could not serialize previous review keyboard")?;
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set pending_publish_variant_json = :pending_publish_variant_json,
+                    previous_keyboard_json = :previous_keyboard_json
+                where chat_id = :chat_id
+                  and post_id = :post_id
+                  and publishing = 0
+                  and published_at is null
+                ",
+                named_params! {
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                    ":pending_publish_variant_json": variant_json,
+                    ":previous_keyboard_json": previous_keyboard_json,
+                },
+            )
+            .context("could not select review publish variant")?;
+        anyhow::ensure!(changed == 1, "unpublished review post does not exist");
+        Ok(())
+    }
+
+    pub fn clear_review_publish(&self, chat_id: i64, post_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set pending_publish_variant_json = null,
+                    previous_keyboard_json = null,
+                    publishing = 0
+                where chat_id = :chat_id and post_id = :post_id
+                ",
+                named_params! {
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                },
+            )
+            .context("could not clear review publish state")?;
+        anyhow::ensure!(changed == 1, "review post does not exist");
+        Ok(())
+    }
+
+    pub fn claim_review_publish(&self, chat_id: i64, post_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set publishing = 1
+                where chat_id = :chat_id
+                  and post_id = :post_id
+                  and pending_publish_variant_json is not null
+                  and publishing = 0
+                  and published_at is null
+                ",
+                named_params! {
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                },
+            )
+            .context("could not claim review publication")?;
+        Ok(changed == 1)
+    }
+
+    pub fn mark_review_published(&self, chat_id: i64, post_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set pending_publish_variant_json = null,
+                    previous_keyboard_json = null,
+                    publishing = 0,
+                    published_at = :published_at
+                where chat_id = :chat_id
+                  and post_id = :post_id
+                  and publishing = 1
+                  and published_at is null
+                ",
+                named_params! {
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                    ":published_at": chrono::Utc::now(),
+                },
+            )
+            .context("could not mark review post published")?;
+        anyhow::ensure!(changed == 1, "unpublished review post does not exist");
+        Ok(())
+    }
+
+    fn query_review_post(
+        &self,
+        filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Option<ReviewPost>> {
+        let conn = self.conn.lock().expect("No poison");
+        let sql = format!(
+            "
+            select chat_id,
+                   post_id,
+                   source_url,
+                   caption_text,
+                   caption_entities_json,
+                   content_kind_json,
+                   review_message_id,
+                   control_message_id,
+                   metadata_text,
+                   metadata_entities_json,
+                   pending_publish_variant_json,
+                   previous_keyboard_json,
+                   published_at
+            from review_post
+            {filter}
+            "
+        );
+        let stored = conn
+            .query_row(&sql, params, |row| {
+                Ok(StoredReviewPost {
+                    chat_id: row.get("chat_id")?,
+                    post_id: row.get("post_id")?,
+                    source_url: row.get("source_url")?,
+                    caption_text: row.get("caption_text")?,
+                    caption_entities_json: row.get("caption_entities_json")?,
+                    content_kind_json: row.get("content_kind_json")?,
+                    review_message_id: row.get("review_message_id")?,
+                    control_message_id: row.get("control_message_id")?,
+                    metadata_text: row.get("metadata_text")?,
+                    metadata_entities_json: row.get("metadata_entities_json")?,
+                    pending_publish_variant_json: row.get("pending_publish_variant_json")?,
+                    previous_keyboard_json: row.get("previous_keyboard_json")?,
+                    published_at: row.get("published_at")?,
+                })
+            })
+            .optional()
+            .context("could not retrieve review post")?;
+        stored.map(ReviewPost::try_from).transpose()
+    }
+}
+
+struct StoredReviewPost {
+    chat_id: i64,
+    post_id: String,
+    source_url: String,
+    caption_text: String,
+    caption_entities_json: String,
+    content_kind_json: String,
+    review_message_id: i32,
+    control_message_id: i32,
+    metadata_text: String,
+    metadata_entities_json: String,
+    pending_publish_variant_json: Option<String>,
+    previous_keyboard_json: Option<String>,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl TryFrom<StoredReviewPost> for ReviewPost {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredReviewPost) -> Result<Self, Self::Error> {
+        Ok(Self {
+            chat_id: stored.chat_id,
+            post_id: stored.post_id,
+            source_url: stored.source_url,
+            caption: RichText {
+                text: stored.caption_text,
+                entities: serde_json::from_str(&stored.caption_entities_json)
+                    .context("could not deserialize review caption entities")?,
+            },
+            content_kind: serde_json::from_str(&stored.content_kind_json)
+                .context("could not deserialize review content kind")?,
+            review_message_id: MessageId(stored.review_message_id),
+            control_message_id: MessageId(stored.control_message_id),
+            metadata: RichText {
+                text: stored.metadata_text,
+                entities: serde_json::from_str(&stored.metadata_entities_json)
+                    .context("could not deserialize review metadata entities")?,
+            },
+            pending_publish_variant: stored
+                .pending_publish_variant_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("could not deserialize pending publish variant")?,
+            previous_keyboard: stored
+                .previous_keyboard_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("could not deserialize previous review keyboard")?,
+            published_at: stored.published_at,
+        })
+    }
 }
 
 pub trait Recordable {
@@ -535,13 +933,10 @@ impl TryFrom<&Row<'_>> for Subscription {
 mod tests {
     use super::*;
     use crate::reddit::PostType;
+    use teloxide::types::{InlineKeyboardButton, MessageEntity, MessageEntityKind};
 
-    #[test]
-    fn test_db() {
-        let config = Config::default();
-        let mut db = Database::open(&config).unwrap();
-        db.migrate().unwrap();
-        let post = Post {
+    fn test_post() -> Post {
+        Post {
             id: "v6nu75".into(),
             post_hint: Some("link".into()),
             subreddit: "absoluteunit".into(),
@@ -551,7 +946,46 @@ mod tests {
             permalink: "/r/absoluteunit/comments/v6nu75/tipping_a_cow_to_trim_its_hooves/".into(),
             url: "https://i.imgur.com/Zt6f5mB.gifv".into(),
             post_type: PostType::Video,
-        };
+        }
+    }
+
+    fn test_review_post() -> ReviewPost {
+        ReviewPost {
+            chat_id: 1,
+            post_id: "v6nu75".to_owned(),
+            source_url: "https://i.imgur.com/Zt6f5mB.gifv".to_owned(),
+            caption: RichText {
+                text: "Tipping a cow".to_owned(),
+                entities: vec![MessageEntity::bold(0, 7)],
+            },
+            content_kind: ReviewContentKind::Media,
+            review_message_id: MessageId(10),
+            control_message_id: MessageId(10),
+            metadata: RichText {
+                text: "Source: https://example.com".to_owned(),
+                entities: vec![MessageEntity::new(MessageEntityKind::Url, 8, 19)],
+            },
+            pending_publish_variant: None,
+            previous_keyboard: None,
+            published_at: None,
+        }
+    }
+
+    fn migrated_db_with_post() -> Database {
+        let config = Config::default();
+        let mut db = Database::open(&config).unwrap();
+        db.migrate().unwrap();
+        db.record_post_seen_with_current_time(1, &test_post())
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn test_db() {
+        let config = Config::default();
+        let mut db = Database::open(&config).unwrap();
+        db.migrate().unwrap();
+        let post = test_post();
 
         assert!(!db.existing_posts_for_subreddit(1, "absoluteunit").unwrap());
         db.record_post_seen_with_current_time(1, &post).unwrap();
@@ -632,5 +1066,140 @@ mod tests {
         assert!(db.is_post_seen(1, &post).unwrap());
         db.unsubscribe(1, "test").unwrap();
         assert!(db.is_post_seen(1, &post).unwrap());
+    }
+
+    #[test]
+    fn review_post_round_trips_rich_text_and_keyboard() {
+        let db = migrated_db_with_post();
+        let mut review = test_review_post();
+        review.pending_publish_variant = Some(PublishVariant::WithLink);
+        review.previous_keyboard =
+            Some(
+                InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
+                    "Post",
+                    r#"{"a":"p","p":"v6nu75"}"#,
+                )]),
+            );
+
+        db.upsert_review_post(&review).unwrap();
+
+        assert_eq!(
+            db.get_review_post(1, "v6nu75").unwrap(),
+            Some(review.clone())
+        );
+        assert_eq!(
+            db.get_review_post_by_control_message(1, MessageId(10))
+                .unwrap(),
+            Some(review)
+        );
+    }
+
+    #[test]
+    fn review_post_does_not_require_a_local_post_cache_entry() {
+        let config = Config::default();
+        let mut db = Database::open(&config).unwrap();
+        db.migrate().unwrap();
+        let review = test_review_post();
+
+        db.upsert_review_post(&review).unwrap();
+
+        assert_eq!(
+            db.get_review_post(review.chat_id, &review.post_id).unwrap(),
+            Some(review)
+        );
+    }
+
+    #[test]
+    fn review_publish_state_transitions_are_persisted() {
+        let db = migrated_db_with_post();
+        let review = test_review_post();
+        db.upsert_review_post(&review).unwrap();
+        let keyboard =
+            InlineKeyboardMarkup::default().append_row([InlineKeyboardButton::callback(
+                "Post",
+                r#"{"a":"p","p":"v6nu75"}"#,
+            )]);
+
+        db.begin_review_publish(
+            review.chat_id,
+            &review.post_id,
+            PublishVariant::WithLink,
+            Some(&keyboard),
+        )
+        .unwrap();
+        let selected = db
+            .get_review_post(review.chat_id, &review.post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected.pending_publish_variant,
+            Some(PublishVariant::WithLink)
+        );
+        assert_eq!(selected.previous_keyboard, Some(keyboard.clone()));
+
+        db.clear_review_publish(review.chat_id, &review.post_id)
+            .unwrap();
+        let cleared = db
+            .get_review_post(review.chat_id, &review.post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.pending_publish_variant, None);
+        assert_eq!(cleared.previous_keyboard, None);
+
+        db.begin_review_publish(
+            review.chat_id,
+            &review.post_id,
+            PublishVariant::Caption,
+            Some(&keyboard),
+        )
+        .unwrap();
+        assert!(
+            db.claim_review_publish(review.chat_id, &review.post_id)
+                .unwrap()
+        );
+        assert!(
+            !db.claim_review_publish(review.chat_id, &review.post_id)
+                .unwrap()
+        );
+        db.mark_review_published(review.chat_id, &review.post_id)
+            .unwrap();
+        let published = db
+            .get_review_post(review.chat_id, &review.post_id)
+            .unwrap()
+            .unwrap();
+        assert!(published.published_at.is_some());
+        assert_eq!(published.pending_publish_variant, None);
+        assert_eq!(published.previous_keyboard, None);
+        assert!(
+            db.begin_review_publish(
+                review.chat_id,
+                &review.post_id,
+                PublishVariant::WithoutCaption,
+                Some(&keyboard),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn updating_review_caption_preserves_other_state() {
+        let db = migrated_db_with_post();
+        let review = test_review_post();
+        db.upsert_review_post(&review).unwrap();
+        let replacement = RichText {
+            text: "A 🐄 caption".to_owned(),
+            entities: vec![MessageEntity::italic(2, 2)],
+        };
+
+        db.update_review_caption(review.chat_id, &review.post_id, &replacement)
+            .unwrap();
+
+        let updated = db
+            .get_review_post(review.chat_id, &review.post_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.caption, replacement);
+        assert_eq!(updated.source_url, review.source_url);
+        assert_eq!(updated.metadata, review.metadata);
     }
 }

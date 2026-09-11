@@ -166,10 +166,6 @@ impl Post {
     pub(crate) fn format_permalink_url(&self, base_url: Option<&str>) -> String {
         format_url_from_path(&self.permalink, base_url)
     }
-
-    pub(crate) fn format_old_permalink_url(&self) -> String {
-        to_old_reddit_url(&format_url_from_path(&self.permalink, None))
-    }
 }
 
 impl Recordable for Post {

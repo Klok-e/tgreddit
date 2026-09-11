@@ -10,8 +10,11 @@ use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::fs;
-use teloxide::{Bot, types::ChatId};
-use tgreddit::{bot, config::Config, db::Database, handle_post, reddit};
+use teloxide::{
+    Bot,
+    types::{ChatId, MessageEntity},
+};
+use tgreddit::{bot, config::Config, db::Database, handle_post, messages, reddit, types::RichText};
 
 const APP_CONFIG_PATH: &str = "tgreddit.toml";
 const E2E_CONFIG_PATH: &str = "telegram-e2e.toml";
@@ -124,22 +127,62 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     let tg = Bot::new(app_config.telegram_bot_token.expose_secret());
     let delivered = handle_post::handle_new_post(&app_config, &tg, operator_id, &post).await?;
 
+    let review = Database::open(&app_config)?
+        .get_review_post(operator_id, &post.id)?
+        .context("delivery did not persist its review post")?;
+    let expected_source_url = match post.post_type {
+        reddit::PostType::Gallery | reddit::PostType::SelfText => {
+            format!("https://www.reddit.com{}", post.permalink)
+        }
+        _ => post.url.clone(),
+    };
+    if review.source_url != expected_source_url {
+        bail!(
+            "review source URL mismatch: expected {expected_source_url:?}, got {:?}",
+            review.source_url
+        );
+    }
+    let expected_post_url =
+        reddit::format_url_from_path(&post.permalink, app_config.links_base_url.as_deref());
+    if review.metadata.text != expected_post_url {
+        bail!(
+            "review post link mismatch: expected {expected_post_url:?}, got {:?}",
+            review.metadata.text
+        );
+    }
+
     let media_post = matches!(
         post.post_type,
         reddit::PostType::Image | reddit::PostType::Video | reddit::PostType::Gallery
     );
+    let rich_caption_text = "Custom rich E2E Repost Caption 👋";
+    let rich_caption = RichText {
+        text: rich_caption_text.to_owned(),
+        entities: vec![MessageEntity::bold(0, 11)],
+    };
     let caption_variants = if media_post {
         vec![
-            Some(post.title.clone()),
+            Some(review.caption.clone()),
             None,
-            Some("Custom E2E Repost Caption 👋".to_owned()),
+            Some(rich_caption),
+            Some(messages::append_source_url(
+                &review.caption,
+                &review.source_url,
+            )),
         ]
     } else {
-        vec![Some(post.title.clone())]
+        vec![
+            Some(review.caption.clone()),
+            Some(rich_caption),
+            Some(messages::append_source_url(
+                &review.caption,
+                &review.source_url,
+            )),
+        ]
     };
     for caption in caption_variants {
         let db = Database::open(&app_config)?;
-        bot::handle_repost_with_caption(
+        bot::handle_repost_with_rich_caption(
             db,
             ChatId(operator_id),
             &tg,
@@ -148,7 +191,7 @@ async fn run_case(test_case: TestCase) -> Result<()> {
             caption.clone(),
         )
         .await
-        .with_context(|| format!("repost with caption {caption:?} failed"))?;
+        .with_context(|| format!("repost with rich caption {caption:?} failed"))?;
     }
 
     Ok(())

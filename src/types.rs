@@ -6,6 +6,7 @@ use crate::{
     reddit::{PostType, TopPostsTimePeriod},
 };
 use std::path::PathBuf;
+use teloxide::types::{InlineKeyboardMarkup, MessageEntity, MessageId};
 
 #[derive(Debug)]
 pub struct Video {
@@ -68,10 +69,60 @@ pub enum RepostAction {
     PostWithoutCaption,
     #[serde(rename = "e")]
     EditCaption,
+    #[serde(rename = "l")]
+    PostWithLink,
+    #[serde(rename = "f")]
+    ConfirmPublish,
+    #[serde(rename = "c")]
+    CancelPublish,
+    // These actions have already been sent to Telegram and must remain
+    // decodable until those messages are no longer in use.
     #[serde(rename = "y")]
     PublishCaption,
     #[serde(rename = "x")]
     CancelCaption,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishVariant {
+    #[serde(rename = "p")]
+    Caption,
+    #[serde(rename = "n")]
+    WithoutCaption,
+    #[serde(rename = "l")]
+    WithLink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewContentKind {
+    #[serde(rename = "m")]
+    Media,
+    #[serde(rename = "g")]
+    Gallery,
+    #[serde(rename = "t")]
+    Text,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichText {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<MessageEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewPost {
+    pub chat_id: i64,
+    pub post_id: String,
+    pub source_url: String,
+    pub caption: RichText,
+    pub content_kind: ReviewContentKind,
+    pub review_message_id: MessageId,
+    pub control_message_id: MessageId,
+    pub metadata: RichText,
+    pub pending_publish_variant: Option<PublishVariant>,
+    pub previous_keyboard: Option<InlineKeyboardMarkup>,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,5 +217,51 @@ mod tests {
 
         assert_eq!(encoded, r#"{"a":"y"}"#);
         assert!(encoded.len() <= 64);
+    }
+
+    #[test]
+    fn all_current_callback_actions_fit_telegram_limit() {
+        let actions = [
+            RepostAction::Post,
+            RepostAction::PostWithoutCaption,
+            RepostAction::EditCaption,
+            RepostAction::PostWithLink,
+            RepostAction::ConfirmPublish,
+            RepostAction::CancelPublish,
+            RepostAction::PublishCaption,
+            RepostAction::CancelCaption,
+        ];
+
+        for action in actions {
+            let encoded = serde_json::to_string(&RepostCallbackData {
+                action,
+                post_id: Some("a2345678901234567890123456789012".to_owned()),
+                is_gallery: true,
+            })
+            .unwrap();
+            assert!(
+                encoded.len() <= 64,
+                "{action:?} callback is {} bytes: {encoded}",
+                encoded.len()
+            );
+            assert_eq!(decode_repost_callback(&encoded).unwrap().action, action);
+        }
+    }
+
+    #[test]
+    fn publish_confirmation_callbacks_need_no_post_data() {
+        for (action, expected) in [
+            (RepostAction::ConfirmPublish, r#"{"a":"f"}"#),
+            (RepostAction::CancelPublish, r#"{"a":"c"}"#),
+        ] {
+            let encoded = serde_json::to_string(&RepostCallbackData {
+                action,
+                post_id: None,
+                is_gallery: false,
+            })
+            .unwrap();
+            assert_eq!(encoded, expected);
+            assert_eq!(decode_repost_callback(&encoded).unwrap().action, action);
+        }
     }
 }
