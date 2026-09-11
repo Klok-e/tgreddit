@@ -31,6 +31,54 @@ use url::Url;
 const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
 type CaptionEditStore = Arc<Mutex<HashMap<i64, CaptionEditState>>>;
 
+const GENERIC_USER_ERROR: &str = "The requested operation could not be completed.";
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct UserFacingError {
+    message: String,
+    #[source]
+    source: Option<anyhow::Error>,
+}
+
+fn user_error(message: impl Into<String>, source: impl Into<anyhow::Error>) -> anyhow::Error {
+    UserFacingError {
+        message: message.into(),
+        source: Some(source.into()),
+    }
+    .into()
+}
+
+fn user_message(message: impl Into<String>) -> anyhow::Error {
+    UserFacingError {
+        message: message.into(),
+        source: None,
+    }
+    .into()
+}
+
+fn user_facing_message_or<'a>(err: &'a anyhow::Error, fallback: &'a str) -> &'a str {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<UserFacingError>())
+        .map(|err| err.message.as_str())
+        .unwrap_or(fallback)
+}
+
+fn user_facing_message(err: &anyhow::Error) -> &str {
+    user_facing_message_or(err, GENERIC_USER_ERROR)
+}
+
+fn classify_error(message: impl Into<String>, err: anyhow::Error) -> anyhow::Error {
+    if err
+        .chain()
+        .any(|cause| cause.downcast_ref::<UserFacingError>().is_some())
+    {
+        err
+    } else {
+        user_error(message, err)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaptionEditState {
     post_id: String,
@@ -375,41 +423,75 @@ async fn handle_no_command(
             static ref RE_REDDIT: Regex = Regex::new(r"comments/(\w+)").unwrap();
         }
 
-        let text = message.text().context("No text in message")?;
+        let Some(text) = message.text() else {
+            tg.send_message(message.chat.id, "This message does not contain text.")
+                .await?;
+            return Ok(());
+        };
 
         if let Some(reply) = malformed_command_reply(text) {
             tg.send_message(message.chat.id, reply).await?;
             return Ok(());
         }
 
-        let db = db::Database::open(config)?;
+        let db = db::Database::open(config)
+            .map_err(|err| user_error("The local database could not be accessed.", err))?;
         if let Some(link) = parse_twitter_status_url(text) {
-            handle_video_link(&db, tg, message.chat.id.0, &link).await?;
+            handle_video_link(&db, tg, message.chat.id.0, &link)
+                .await
+                .map_err(|err| user_error("The video link could not be processed.", err))?;
         } else if is_youtube_url(text) {
-            let link = Url::parse(text)?;
-            handle_video_link(&db, tg, message.chat.id.0, &link).await?;
+            let link =
+                Url::parse(text).map_err(|err| user_error("The video link is invalid.", err))?;
+            handle_video_link(&db, tg, message.chat.id.0, &link)
+                .await
+                .map_err(|err| user_error("The video link could not be processed.", err))?;
         } else {
-            let id = RE_REDDIT
+            let Some(id) = RE_REDDIT
                 .captures(text)
-                .context("Couldn't match reddit post url")?
-                .get(1)
-                .context("Couldn't find reddit post id")?
-                .as_str();
-            let post = reddit::get_link(id).await?;
+                .and_then(|captures| captures.get(1))
+                .map(|id| id.as_str())
+            else {
+                tg.send_message(
+                    message.chat.id,
+                    "Send a Reddit post URL, X/Twitter status URL, YouTube URL, or a bot command.",
+                )
+                .await?;
+                return Ok(());
+            };
+            let post = reddit::get_link(id)
+                .await
+                .map_err(|err| user_error("The Reddit post could not be retrieved.", err))?;
             let chat_id = message.chat.id.0;
-            db.record_post_seen_with_current_time(chat_id, &post)?;
-            handle_new_post(config, tg, chat_id, &post).await?;
+            db.record_post_seen_with_current_time(chat_id, &post)
+                .map_err(|err| user_error("The Reddit post could not be recorded.", err))?;
+            handle_new_post(config, tg, chat_id, &post)
+                .await
+                .map_err(|err| user_error("The Reddit post could not be delivered.", err))?;
         }
 
         Ok(())
     }
-    if handle_caption_input(&message, &tg, &config, &caption_edits).await? {
-        return Ok(());
+    match handle_caption_input(&message, &tg, &config, &caption_edits).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(err) => {
+            error!("failed to handle repost caption: {err:?}");
+            tg.send_message(
+                message.chat.id,
+                user_facing_message_or(&err, "The repost caption could not be updated."),
+            )
+            .await?;
+            return Ok(());
+        }
     }
     if let Err(err) = handle(&message, &tg, &config).await {
         error!("failed to handle message: {err:?}");
-        tg.send_message(message.chat.id, format!("Something went wrong: {err}"))
-            .await?;
+        tg.send_message(
+            message.chat.id,
+            user_facing_message_or(&err, "The message could not be processed."),
+        )
+        .await?;
     }
 
     Ok(())
@@ -429,7 +511,8 @@ async fn handle_command(
         config: Arc<config::Config>,
         caption_edits: &CaptionEditStore,
     ) -> Result<()> {
-        let db = db::Database::open(&config)?;
+        let db = db::Database::open(&config)
+            .map_err(|err| user_error("The local database could not be accessed.", err))?;
         match command {
             Command::Help => {
                 tg.send_message(message.chat.id, Command::descriptions().to_string())
@@ -465,7 +548,10 @@ async fn handle_command(
                         .await?;
                     }
                     Err(err) => {
-                        Err(err).context("Couldn't download about.json for subreddit")?;
+                        return Err(user_error(
+                            "Subreddit information could not be retrieved.",
+                            err,
+                        ));
                     }
                 }
             }
@@ -502,7 +588,9 @@ async fn handle_command(
                     "" => None,
                     _ => Some(description),
                 };
-                handle_repost(db, message.chat.id, tg, message_id, button_data).await?;
+                handle_repost(db, message.chat.id, tg, message_id, button_data)
+                    .await
+                    .map_err(|err| classify_error("The message could not be reposted.", err))?;
             }
             Command::Cancel => {
                 if !cancel_caption_edit(caption_edits, tg, &db, message.chat.id).await {
@@ -517,8 +605,11 @@ async fn handle_command(
 
     if let Err(err) = handle(&message, &tg, command, config, &caption_edits).await {
         error!("failed to handle message: {err:?}");
-        tg.send_message(message.chat.id, "Something went wrong")
-            .await?;
+        tg.send_message(
+            message.chat.id,
+            user_facing_message_or(&err, "The command could not be completed."),
+        )
+        .await?;
     }
 
     Ok(())
@@ -540,7 +631,7 @@ async fn handle_repost(
 
 fn repost_channel_id(db: &db::Database, chat_id: ChatId) -> Result<ChatId> {
     let Some(repost_channel_id) = db.get_repost_channel(chat_id.0)? else {
-        anyhow::bail!("Repost channel not registered");
+        return Err(user_message("No repost channel is registered."));
     };
     Ok(ChatId(repost_channel_id))
 }
@@ -701,7 +792,12 @@ async fn handle_get_command(
     let chat_id = message.chat.id.0;
     let posts = reddit::get_subreddit_top_posts(subreddit, limit, &time)
         .await
-        .context("failed to get posts")?
+        .map_err(|err| {
+            user_error(
+                format!("Posts from r/{subreddit} could not be retrieved."),
+                err.context("failed to get posts"),
+            )
+        })?
         .into_iter()
         .filter(|p| {
             if filter.is_some() {
@@ -714,7 +810,14 @@ async fn handle_get_command(
     debug!("got {} post(s) for subreddit /r/{}", posts.len(), subreddit);
     if !posts.is_empty() {
         for post in posts {
-            process_post(&db, chat_id, &post, &config, tg).await?;
+            process_post(&db, chat_id, &post, &config, tg)
+                .await
+                .map_err(|err| {
+                    user_error(
+                        format!("Posts from r/{subreddit} could not be delivered."),
+                        err,
+                    )
+                })?;
         }
     } else {
         tg.send_message(message.chat.id, "No posts found").await?;
@@ -1001,6 +1104,31 @@ async fn callback_handler(
     tg: Arc<Bot>,
     caption_edits: CaptionEditStore,
 ) -> Result<()> {
+    let callback_id = q.id.clone();
+    let chat_id = q
+        .message
+        .as_ref()
+        .and_then(|message| message.regular_message())
+        .map(|message| message.chat.id);
+
+    if let Err(err) = callback_handler_inner(q, config, tg.clone(), caption_edits).await {
+        error!("failed to handle repost callback: {err:?}");
+        let message = user_facing_message_or(&err, "The repost action could not be completed.");
+        tg.answer_callback_query(callback_id).text(message).await?;
+        if let Some(chat_id) = chat_id {
+            tg.send_message(chat_id, message).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn callback_handler_inner(
+    q: CallbackQuery,
+    config: Arc<config::Config>,
+    tg: Arc<Bot>,
+    caption_edits: CaptionEditStore,
+) -> Result<()> {
     let db = db::Database::open(&config)?;
     let callback_message = q.message.context("callback message is unavailable")?;
     let message = callback_message
@@ -1061,7 +1189,10 @@ async fn callback_handler(
             {
                 delete_edit_prompt(&tg, chat_id, &edit).await;
             }
-            match publish_review(&config, &tg, &review).await {
+            match publish_review(&config, &tg, &review)
+                .await
+                .map_err(|err| classify_error("The repost could not be published.", err))
+            {
                 Ok(()) => {
                     db.mark_review_published(chat_id.0, &review.post_id)?;
                     tg.edit_message_reply_markup(chat_id, review.control_message_id)
@@ -1070,13 +1201,13 @@ async fn callback_handler(
                     tg.answer_callback_query(q.id).text("Published").await?;
                 }
                 Err(err) => {
+                    error!("failed to publish repost: {err:?}");
                     restore_review_keyboard(&tg, &review).await?;
                     db.clear_review_publish(chat_id.0, &review.post_id)?;
                     tg.answer_callback_query(q.id)
                         .text("Failed to publish")
                         .await?;
-                    tg.send_message(chat_id, format!("Failed to publish: {err}"))
-                        .await?;
+                    tg.send_message(chat_id, user_facing_message(&err)).await?;
                 }
             }
         }
@@ -1344,6 +1475,33 @@ mod tests {
             Some("Unknown command. Send /help to see the available commands.")
         );
         assert_eq!(malformed_command_reply("plain text"), None);
+    }
+
+    #[test]
+    fn user_facing_error_keeps_technical_details_out_of_telegram_messages() {
+        let classified = user_error(
+            "The Reddit post could not be retrieved.",
+            anyhow::anyhow!("OAuth transport returned HTTP 502"),
+        );
+        assert_eq!(
+            user_facing_message(&classified),
+            "The Reddit post could not be retrieved."
+        );
+
+        let expected = user_message("No repost channel is registered.");
+        assert_eq!(
+            user_facing_message(&expected),
+            "No repost channel is registered."
+        );
+
+        let preserved = classify_error("The message could not be reposted.", expected);
+        assert_eq!(
+            user_facing_message(&preserved),
+            "No repost channel is registered."
+        );
+
+        let unclassified = anyhow::anyhow!("sqlite is locked");
+        assert_eq!(user_facing_message(&unclassified), GENERIC_USER_ERROR);
     }
 
     #[test]
