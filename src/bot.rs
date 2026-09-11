@@ -64,21 +64,6 @@ fn user_facing_message_or<'a>(err: &'a anyhow::Error, fallback: &'a str) -> &'a 
         .unwrap_or(fallback)
 }
 
-fn user_facing_message(err: &anyhow::Error) -> &str {
-    user_facing_message_or(err, GENERIC_USER_ERROR)
-}
-
-fn classify_error(message: impl Into<String>, err: anyhow::Error) -> anyhow::Error {
-    if err
-        .chain()
-        .any(|cause| cause.downcast_ref::<UserFacingError>().is_some())
-    {
-        err
-    } else {
-        user_error(message, err)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaptionEditState {
     post_id: String,
@@ -112,11 +97,6 @@ pub enum Command {
     Get(SubscriptionArgs),
     #[command(description = "register channel to which the bot is supposed to post")]
     RegisterChannel(i64),
-    #[command(description = "repost to the registered channel", parse_with = "split")]
-    RepostToChannel {
-        message_id: i32,
-        description: String,
-    },
     #[command(description = "cancel the active caption edit")]
     Cancel,
 }
@@ -580,18 +560,6 @@ async fn handle_command(
                 )
                 .await?;
             }
-            Command::RepostToChannel {
-                description,
-                message_id,
-            } => {
-                let button_data = match description.as_str() {
-                    "" => None,
-                    _ => Some(description),
-                };
-                handle_repost(db, message.chat.id, tg, message_id, button_data)
-                    .await
-                    .map_err(|err| classify_error("The message could not be reposted.", err))?;
-            }
             Command::Cancel => {
                 if !cancel_caption_edit(caption_edits, tg, &db, message.chat.id).await {
                     tg.send_message(message.chat.id, "No caption edit is active.")
@@ -613,20 +581,6 @@ async fn handle_command(
     }
 
     Ok(())
-}
-
-async fn handle_repost(
-    db: db::Database,
-    chat_id: ChatId,
-    tg: &Bot,
-    message_id: i32,
-    caption: Option<String>,
-) -> Result<()> {
-    let caption = caption.map(|text| RichText {
-        text,
-        entities: Vec::new(),
-    });
-    handle_repost_media(db, chat_id, tg, MessageId(message_id), caption.as_ref()).await
 }
 
 fn repost_channel_id(db: &db::Database, chat_id: ChatId) -> Result<ChatId> {
@@ -695,49 +649,6 @@ async fn handle_repost_text(
         .entities(content.entities.clone())
         .await?;
     Ok(())
-}
-
-/// Direct-invocation seam for the inline-button repost flow. Accepts a
-/// constructed callback payload (the message id(s), the post, and the
-/// with-caption flag) and drives the same flow as `callback_handler` would
-/// for an inline-button callback, without going through teloxide's
-/// `CallbackQuery` dispatcher.
-///
-/// This is used by the live E2E tests to simulate a button tap. The
-/// production dispatcher continues to call the same underlying repost
-/// logic unchanged.
-#[doc(hidden)]
-pub async fn handle_repost_from_callback(
-    db: db::Database,
-    chat_id: ChatId,
-    tg: &Bot,
-    post: &reddit::Post,
-    delivered: &DeliveredMessages,
-    with_caption: bool,
-) -> Result<()> {
-    let caption = if with_caption {
-        Some(db.get_post_title(chat_id.0, &post.id)?)
-    } else {
-        None
-    };
-    handle_repost_with_caption(db, chat_id, tg, post, delivered, caption).await
-}
-
-/// Direct-invocation seam for reposting with an explicit plain-text caption.
-#[doc(hidden)]
-pub async fn handle_repost_with_caption(
-    db: db::Database,
-    chat_id: ChatId,
-    tg: &Bot,
-    post: &reddit::Post,
-    delivered: &DeliveredMessages,
-    caption: Option<String>,
-) -> Result<()> {
-    let caption = caption.map(|text| RichText {
-        text,
-        entities: Vec::new(),
-    });
-    handle_repost_with_rich_caption(db, chat_id, tg, post, delivered, caption).await
 }
 
 /// Direct-invocation seam for reposting with an explicit rich-text caption.
@@ -888,9 +799,6 @@ fn malformed_command_reply(input: &str) -> Option<&'static str> {
         "registerchannel" => {
             Some("Usage: /registerchannel <channel_id>\n\nExample: /registerchannel -1001234567890")
         }
-        "reposttochannel" => Some(
-            "Usage: /reposttochannel <message_id> <caption>\n\nExample: /reposttochannel 42 My repost caption",
-        ),
         "sub" => Some(
             "Usage: /sub <subreddit> [limit=<number>] [time=<period>] [filter=<type>]\n\nExample: /sub rust limit=5 time=week",
         ),
@@ -1134,17 +1042,19 @@ async fn callback_handler_inner(
     let message = callback_message
         .regular_message()
         .context("callback message is inaccessible")?;
-    let data = decode_repost_callback(q.data.as_deref().context("callback data is missing")?)?;
+    let data = q
+        .data
+        .as_deref()
+        .ok_or_else(|| user_message("This review control is no longer supported."))?;
+    let data = decode_repost_callback(data)
+        .map_err(|err| user_error("This review control is no longer supported.", err))?;
     let chat_id = message.chat.id;
 
     match data.action {
-        RepostAction::Post
-        | RepostAction::PostWithoutCaption
-        | RepostAction::PostWithLink
-        | RepostAction::EditCaption => {
+        RepostAction::Post | RepostAction::PostWithoutCaption | RepostAction::PostWithLink => {
             let post_id = data.post_id.context("repost callback has no post id")?;
             let variant = match data.action {
-                RepostAction::Post | RepostAction::EditCaption => PublishVariant::Caption,
+                RepostAction::Post => PublishVariant::Caption,
                 RepostAction::PostWithoutCaption => PublishVariant::WithoutCaption,
                 RepostAction::PostWithLink => PublishVariant::WithLink,
                 _ => unreachable!(),
@@ -1189,10 +1099,7 @@ async fn callback_handler_inner(
             {
                 delete_edit_prompt(&tg, chat_id, &edit).await;
             }
-            match publish_review(&config, &tg, &review)
-                .await
-                .map_err(|err| classify_error("The repost could not be published.", err))
-            {
+            match publish_review(&config, &tg, &review).await {
                 Ok(()) => {
                     db.mark_review_published(chat_id.0, &review.post_id)?;
                     tg.edit_message_reply_markup(chat_id, review.control_message_id)
@@ -1207,7 +1114,8 @@ async fn callback_handler_inner(
                     tg.answer_callback_query(q.id)
                         .text("Failed to publish")
                         .await?;
-                    tg.send_message(chat_id, user_facing_message(&err)).await?;
+                    tg.send_message(chat_id, user_facing_message_or(&err, GENERIC_USER_ERROR))
+                        .await?;
                 }
             }
         }
@@ -1229,11 +1137,6 @@ async fn callback_handler_inner(
             }
             restore_review_keyboard(&tg, &review).await?;
             db.clear_review_publish(chat_id.0, &review.post_id)?;
-        }
-        RepostAction::PublishCaption | RepostAction::CancelCaption => {
-            tg.answer_callback_query(q.id)
-                .text("This older caption preview is no longer active.")
-                .await?;
         }
     }
 
@@ -1460,12 +1363,6 @@ mod tests {
                 "Usage: /registerchannel <channel_id>\n\nExample: /registerchannel -1001234567890"
             )
         );
-        assert_eq!(
-            malformed_command_reply("/reposttochannel@my_bot"),
-            Some(
-                "Usage: /reposttochannel <message_id> <caption>\n\nExample: /reposttochannel 42 My repost caption"
-            )
-        );
     }
 
     #[test]
@@ -1474,7 +1371,20 @@ mod tests {
             malformed_command_reply("/notacommand"),
             Some("Unknown command. Send /help to see the available commands.")
         );
+        assert_eq!(
+            malformed_command_reply("/reposttochannel@my_bot"),
+            Some("Unknown command. Send /help to see the available commands.")
+        );
         assert_eq!(malformed_command_reply("plain text"), None);
+    }
+
+    #[test]
+    fn bot_commands_exclude_legacy_repost_command() {
+        assert!(
+            Command::bot_commands()
+                .iter()
+                .all(|command| command.command != "/reposttochannel")
+        );
     }
 
     #[test]
@@ -1484,24 +1394,21 @@ mod tests {
             anyhow::anyhow!("OAuth transport returned HTTP 502"),
         );
         assert_eq!(
-            user_facing_message(&classified),
+            user_facing_message_or(&classified, GENERIC_USER_ERROR),
             "The Reddit post could not be retrieved."
         );
 
         let expected = user_message("No repost channel is registered.");
         assert_eq!(
-            user_facing_message(&expected),
-            "No repost channel is registered."
-        );
-
-        let preserved = classify_error("The message could not be reposted.", expected);
-        assert_eq!(
-            user_facing_message(&preserved),
+            user_facing_message_or(&expected, GENERIC_USER_ERROR),
             "No repost channel is registered."
         );
 
         let unclassified = anyhow::anyhow!("sqlite is locked");
-        assert_eq!(user_facing_message(&unclassified), GENERIC_USER_ERROR);
+        assert_eq!(
+            user_facing_message_or(&unclassified, GENERIC_USER_ERROR),
+            GENERIC_USER_ERROR
+        );
     }
 
     #[test]

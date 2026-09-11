@@ -50,37 +50,18 @@ pub struct SubscriptionArgs {
     pub filter: Option<PostType>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename = "BtnDt")]
-pub struct ButtonCallbackData {
-    #[serde(rename = "n")]
-    pub post_id: String,
-    #[serde(rename = "c")]
-    pub copy_caption: bool,
-    #[serde(rename = "d")]
-    pub is_gallery: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepostAction {
     #[serde(rename = "p")]
     Post,
     #[serde(rename = "n")]
     PostWithoutCaption,
-    #[serde(rename = "e")]
-    EditCaption,
     #[serde(rename = "l")]
     PostWithLink,
     #[serde(rename = "f")]
     ConfirmPublish,
     #[serde(rename = "c")]
     CancelPublish,
-    // These actions have already been sent to Telegram and must remain
-    // decodable until those messages are no longer in use.
-    #[serde(rename = "y")]
-    PublishCaption,
-    #[serde(rename = "x")]
-    CancelCaption,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,32 +120,8 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct DecodedRepostCallback {
-    pub action: RepostAction,
-    pub post_id: Option<String>,
-    pub is_gallery: bool,
-}
-
-pub fn decode_repost_callback(data: &str) -> serde_json::Result<DecodedRepostCallback> {
-    if let Ok(data) = serde_json::from_str::<RepostCallbackData>(data) {
-        return Ok(DecodedRepostCallback {
-            action: data.action,
-            post_id: data.post_id,
-            is_gallery: data.is_gallery,
-        });
-    }
-
-    let legacy = serde_json::from_str::<ButtonCallbackData>(data)?;
-    Ok(DecodedRepostCallback {
-        action: if legacy.copy_caption {
-            RepostAction::Post
-        } else {
-            RepostAction::PostWithoutCaption
-        },
-        post_id: Some(legacy.post_id),
-        is_gallery: legacy.is_gallery,
-    })
+pub fn decode_repost_callback(data: &str) -> serde_json::Result<RepostCallbackData> {
+    serde_json::from_str(data)
 }
 
 #[cfg(test)]
@@ -174,17 +131,18 @@ mod tests {
     #[test]
     fn decodes_new_repost_callback() {
         let encoded = serde_json::to_string(&RepostCallbackData {
-            action: RepostAction::EditCaption,
+            action: RepostAction::Post,
             post_id: Some("abc123".to_owned()),
             is_gallery: true,
         })
         .unwrap();
 
+        assert_eq!(encoded, r#"{"a":"p","p":"abc123","g":true}"#);
         assert!(encoded.len() <= 64);
         assert_eq!(
             decode_repost_callback(&encoded).unwrap(),
-            DecodedRepostCallback {
-                action: RepostAction::EditCaption,
+            RepostCallbackData {
+                action: RepostAction::Post,
                 post_id: Some("abc123".to_owned()),
                 is_gallery: true,
             }
@@ -192,31 +150,16 @@ mod tests {
     }
 
     #[test]
-    fn decodes_legacy_repost_callbacks() {
+    fn rejects_legacy_repost_callbacks() {
         let with_caption = r#"{"n":"abc123","c":true,"d":true}"#;
         let without_caption = r#"{"n":"abc123","c":false,"d":false}"#;
+        let legacy_edit_caption = r#"{"a":"e","p":"abc123"}"#;
+        let legacy_publish_caption = r#"{"a":"y"}"#;
 
-        assert_eq!(
-            decode_repost_callback(with_caption).unwrap().action,
-            RepostAction::Post
-        );
-        assert_eq!(
-            decode_repost_callback(without_caption).unwrap().action,
-            RepostAction::PostWithoutCaption
-        );
-    }
-
-    #[test]
-    fn confirmation_callback_is_compact() {
-        let encoded = serde_json::to_string(&RepostCallbackData {
-            action: RepostAction::PublishCaption,
-            post_id: None,
-            is_gallery: false,
-        })
-        .unwrap();
-
-        assert_eq!(encoded, r#"{"a":"y"}"#);
-        assert!(encoded.len() <= 64);
+        assert!(decode_repost_callback(with_caption).is_err());
+        assert!(decode_repost_callback(without_caption).is_err());
+        assert!(decode_repost_callback(legacy_edit_caption).is_err());
+        assert!(decode_repost_callback(legacy_publish_caption).is_err());
     }
 
     #[test]
@@ -224,12 +167,9 @@ mod tests {
         let actions = [
             RepostAction::Post,
             RepostAction::PostWithoutCaption,
-            RepostAction::EditCaption,
             RepostAction::PostWithLink,
             RepostAction::ConfirmPublish,
             RepostAction::CancelPublish,
-            RepostAction::PublishCaption,
-            RepostAction::CancelCaption,
         ];
 
         for action in actions {
