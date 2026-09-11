@@ -4,8 +4,8 @@ Wants=network-online.target
 
 [Service]
 User=pi
-ExecStartPre=-/usr/bin/timeout 5m /home/pi/.local/bin/pipx upgrade yt-dlp --include-injected
-ExecStartPre=-/usr/bin/timeout 5m /home/pi/.local/bin/pipx inject --force yt-dlp curl-cffi
+ExecStartPre=-/usr/bin/timeout 5m /usr/bin/pipx upgrade yt-dlp --include-injected
+ExecStartPre=-/usr/bin/timeout 5m /usr/bin/pipx inject --force yt-dlp curl-cffi
 ExecStart=/home/pi/.cargo/bin/tgreddit
 WorkingDirectory=/home/pi/tgreddit
 Restart=on-failure
