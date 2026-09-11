@@ -2,13 +2,13 @@
 
 A telegram bot that gives you a feed of top posts from your favorite subreddits.
 
+This repository is a fork of [raine/tgreddit](https://github.com/raine/tgreddit), maintained for this deployment and its additional behavior.
+
 The killer feature: No need to visit Reddit, as all media is embedded thanks to
 [yt-dlp][yt-dlp] and Telegram's excellent media support.
 
 Intended to be self-hosted, as Reddit's API has rate-limiting and downloading
-videos with `yt-dlp` can be resource intensive. The simplest way to self-host is
-to use the prebuilt [docker image](#docker-image) that includes necessary
-dependencies.
+videos with `yt-dlp` can be resource intensive.
 
 <img align=left src="https://user-images.githubusercontent.com/11027/178097057-83b27933-9876-405a-b151-a148960819df.jpeg" width=20% height=20%>
 <img align=left src="https://user-images.githubusercontent.com/11027/178096986-5f651336-8208-4c40-9c41-58c95173b24d.jpeg" width=20% height=20%>
@@ -22,7 +22,11 @@ $ cargo install tgreddit
 
 ### requirements
 
-Depends on [yt-dlp][yt-dlp] (and for good results, yt-dlp requires ffmpeg).
+Depends on [yt-dlp][yt-dlp] and ffmpeg. Reliable YouTube downloads also require [Deno](https://deno.com/) on `PATH` so yt-dlp can solve YouTube's JavaScript challenges.
+
+### Raspberry Pi service
+
+[`deploy/systemd/tgreddit.service`](deploy/systemd/tgreddit.service) is the production service definition for this fork's Raspberry Pi deployment. It expects TGReddit, pipx-managed yt-dlp, Deno, and the configuration file at the paths declared in the unit. The best-effort startup maintenance commands update yt-dlp and its injected curl-cffi dependency before launching the bot.
 
 ## testing
 
@@ -161,14 +165,6 @@ default_filter = "video"
 Perhaps the simplest way to determine a Telegram channel's ID is to open the
 channel in [Telegram Web client][telegram-web] and observing the numeric value
 in page URL.
-
-## docker image
-
-There's a prebuilt Docker image with dependencies included at
-[rainevi/tgreddit](https://hub.docker.com/repository/docker/rainevi/tgreddit).
-
-Of course, you may also build your own using from the
-[Dockerfile](https://raw.githubusercontent.com/raine/tgreddit/master/Dockerfile).
 
 ## reddit transport
 

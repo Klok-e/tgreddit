@@ -1,0 +1,20 @@
+[Unit]
+After=network-online.target telegram-bot-api@pi.service
+Wants=network-online.target
+
+[Service]
+User=pi
+ExecStartPre=-/usr/bin/timeout 5m /home/pi/.local/bin/pipx upgrade yt-dlp --include-injected
+ExecStartPre=-/usr/bin/timeout 5m /home/pi/.local/bin/pipx inject --force yt-dlp curl-cffi
+ExecStart=/home/pi/.cargo/bin/tgreddit
+WorkingDirectory=/home/pi/tgreddit
+Restart=on-failure
+RestartSec=600
+TimeoutStartSec=11min
+Environment="CONFIG_PATH=/mnt/transcend/dima/Doc/configs/tgreddit.toml"
+Environment="RUST_LOG=info"
+Environment="TELEGRAM_BOT_API_URL=http://localhost:8081"
+Environment="PATH=/home/pi/.deno/bin:/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,19 +1,49 @@
 use anyhow::{Context, Result};
 use duct::cmd;
 use lazy_static::lazy_static;
-use log::info;
+use log::{info, warn};
 use std::{
     ffi::OsString,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
+    process::Output,
 };
 
 use crate::types::*;
 
 use regex::Regex;
 use tempfile::TempDir;
+use url::Url;
 
-fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
+const YOUTUBE_FORMATS: &[&str] = &[
+    "bv[height<=1080]+ba/b[height<=1080]",
+    "bv[height<=720]+ba/b[height<=720]",
+    "bv[height<=480]+ba/b[height<=480]",
+    "18",
+];
+const GENERIC_FORMATS: &[&str] = &["bv[height<=1080]+ba/best"];
+
+fn format_selectors(url: &str) -> &'static [&'static str] {
+    let is_youtube = Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be"
+        });
+
+    if is_youtube {
+        YOUTUBE_FORMATS
+    } else {
+        GENERIC_FORMATS
+    }
+}
+
+fn fallback_reason(output: &str) -> Option<&str> {
+    output.lines().rev().find(|line| line.starts_with("ERROR:"))
+}
+
+fn make_ytdlp_args(output: &Path, url: &str, format_selector: &str) -> Vec<OsString> {
     vec![
         "--impersonate".into(),
         "Firefox-135".into(),
@@ -24,7 +54,7 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
         // way to make that happens is have yt-dlp write them in the filename.
         "%(title).200B_[%(id)s]_%(width)sx%(height)s.%(ext)s".into(),
         "-f".into(),
-        "bv[height<=1080]+ba/best".into(),
+        format_selector.into(),
         "-S".into(),
         "res,ext:mp4:m4a".into(),
         "--recode".into(),
@@ -34,31 +64,76 @@ fn make_ytdlp_args(output: &Path, url: &str) -> Vec<OsString> {
     ]
 }
 
+trait YtdlpRunner {
+    fn run(&mut self, args: &[OsString]) -> io::Result<Output>;
+}
+
+struct CommandYtdlpRunner;
+
+impl YtdlpRunner for CommandYtdlpRunner {
+    fn run(&mut self, args: &[OsString]) -> io::Result<Output> {
+        cmd("yt-dlp", args.iter().cloned())
+            .stderr_to_stdout()
+            .stdout_capture()
+            .unchecked()
+            .run()
+    }
+}
+
 /// Downloads given url with yt-dlp and returns path to video
 pub fn download(url: &str) -> Result<Video> {
+    download_with_runner(url, &mut CommandYtdlpRunner)
+}
+
+fn download_with_runner(url: &str, runner: &mut impl YtdlpRunner) -> Result<Video> {
     let tmp_dir = TempDir::with_prefix("tgreddit")?;
-    let tmp_path = tmp_dir.path();
-    let ytdlp_args = make_ytdlp_args(tmp_path, url);
+    let selectors = format_selectors(url);
 
-    info!("running yt-dlp with arguments {ytdlp_args:?}");
-    let output = cmd("yt-dlp", ytdlp_args)
-        .stderr_to_stdout()
-        .stdout_capture()
-        .unchecked()
-        .run()
-        .context("Failed to run yt-dlp")?;
+    for (attempt, selector) in selectors.iter().enumerate() {
+        let attempt_path = tmp_dir.path().join(format!("attempt-{attempt}"));
+        fs::create_dir(&attempt_path).context("Could not create yt-dlp attempt directory")?;
+        let ytdlp_args = make_ytdlp_args(&attempt_path, url, selector);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        info!("{line}");
+        info!("running yt-dlp with arguments {ytdlp_args:?}");
+        let output = runner.run(&ytdlp_args).context("Failed to run yt-dlp")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            info!("{line}");
+        }
+
+        if output.status.success() {
+            return video_from_download(url, tmp_dir, attempt_path);
+        }
+
+        let error_line = fallback_reason(&stdout);
+        let reason = error_line
+            .map(|line| format!(": {line}"))
+            .unwrap_or_default();
+        if let Some(next_selector) = selectors.get(attempt + 1) {
+            warn!(
+                "yt-dlp format {selector:?} failed with {}{reason}; falling back to {next_selector:?}",
+                output.status
+            );
+        } else {
+            warn!(
+                "yt-dlp format {selector:?} failed with {}{reason}; no fallback remains",
+                output.status
+            );
+            anyhow::bail!(
+                "yt-dlp format {selector:?} failed with {}: {}",
+                output.status,
+                stdout.trim()
+            );
+        }
     }
 
-    if !output.status.success() {
-        anyhow::bail!("yt-dlp failed with {}: {}", output.status, stdout.trim());
-    }
+    anyhow::bail!("yt-dlp exhausted all format selectors")
+}
 
-    // yt-dlp is expected to write a single file, which is the video, to tmp_path
-    let video_path = get_video_path(tmp_path)?;
+fn video_from_download(url: &str, tmp_dir: TempDir, successful_path: PathBuf) -> Result<Video> {
+    // yt-dlp is expected to write a single file, which is the video, to its attempt directory.
+    let video_path = get_video_path(&successful_path)?;
 
     let (title, id, width, height) =
         parse_metadata_from_path(&video_path).context("Video filename should have dimensions")?;
@@ -126,15 +201,179 @@ fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_video_path, make_ytdlp_args, parse_metadata_from_path};
-    use std::fs::File;
+    use super::{
+        GENERIC_FORMATS, YOUTUBE_FORMATS, YtdlpRunner, download_with_runner, fallback_reason,
+        format_selectors, get_video_path, make_ytdlp_args, parse_metadata_from_path,
+    };
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::fs::{self, File};
+    use std::io;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
+    use std::process::{ExitStatus, Output};
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
+    struct FakeRunner {
+        statuses: VecDeque<i32>,
+        selectors: Vec<String>,
+        output_paths: Vec<std::path::PathBuf>,
+    }
+
+    impl FakeRunner {
+        fn with_statuses(statuses: impl IntoIterator<Item = i32>) -> Self {
+            Self {
+                statuses: statuses.into_iter().collect(),
+                selectors: Vec::new(),
+                output_paths: Vec::new(),
+            }
+        }
+    }
+
+    impl YtdlpRunner for FakeRunner {
+        fn run(&mut self, args: &[OsString]) -> io::Result<Output> {
+            let format_index = args.iter().position(|arg| arg == "-f").unwrap();
+            self.selectors
+                .push(args[format_index + 1].to_string_lossy().into_owned());
+            let status = self.statuses.pop_front().unwrap();
+            let paths_index = args.iter().position(|arg| arg == "--paths").unwrap();
+            let output_path = std::path::PathBuf::from(&args[paths_index + 1]);
+            self.output_paths.push(output_path.clone());
+            if status == 0 {
+                fs::write(output_path.join("video_[id]_1280x720.mp4"), [])?;
+            } else {
+                fs::write(output_path.join("partial.part"), [])?;
+            }
+            Ok(Output {
+                status: ExitStatus::from_raw(status << 8),
+                stdout: if status == 0 {
+                    b"download complete".to_vec()
+                } else {
+                    b"ERROR: requested format failed".to_vec()
+                },
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn youtube_urls_use_the_quality_fallback_ladder() {
+        assert_eq!(
+            format_selectors("https://www.youtube.com/watch?v=video"),
+            [
+                "bv[height<=1080]+ba/b[height<=1080]",
+                "bv[height<=720]+ba/b[height<=720]",
+                "bv[height<=480]+ba/b[height<=480]",
+                "18",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_supported_youtube_hostnames_use_the_fallback_ladder() {
+        for url in [
+            "https://youtube.com/watch?v=video",
+            "https://m.youtube.com/watch?v=video",
+            "https://YOUTUBE.COM/watch?v=video",
+            "https://youtu.be/video",
+        ] {
+            assert_eq!(format_selectors(url), YOUTUBE_FORMATS, "{url}");
+        }
+
+        for url in [
+            "https://youtube.com.evil.example/watch?v=video",
+            "https://notyoutube.com/watch?v=video",
+            "https://sub.youtu.be/video",
+            "not a URL",
+        ] {
+            assert_eq!(format_selectors(url), GENERIC_FORMATS, "{url}");
+        }
+    }
+
+    #[test]
+    fn youtube_download_falls_back_after_a_failed_attempt() {
+        let mut runner = FakeRunner::with_statuses([1, 0]);
+
+        let video = download_with_runner("https://youtu.be/video", &mut runner).unwrap();
+
+        assert_eq!(video.title, "video");
+        assert_eq!(
+            runner.selectors,
+            [
+                "bv[height<=1080]+ba/b[height<=1080]",
+                "bv[height<=720]+ba/b[height<=720]",
+            ]
+        );
+    }
+
+    struct LaunchFailingRunner {
+        calls: usize,
+    }
+
+    impl YtdlpRunner for LaunchFailingRunner {
+        fn run(&mut self, _args: &[OsString]) -> io::Result<Output> {
+            self.calls += 1;
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing yt-dlp"))
+        }
+    }
+
+    #[test]
+    fn yt_dlp_launch_failure_stops_without_trying_another_format() {
+        let mut runner = LaunchFailingRunner { calls: 0 };
+
+        let error =
+            download_with_runner("https://youtube.com/watch?v=video", &mut runner).unwrap_err();
+
+        assert_eq!(runner.calls, 1);
+        assert!(error.to_string().contains("Failed to run yt-dlp"));
+    }
+
+    #[test]
+    fn fallback_attempts_use_isolated_output_directories() {
+        let mut runner = FakeRunner::with_statuses([1, 0]);
+
+        let video = download_with_runner("https://youtube.com/watch?v=video", &mut runner).unwrap();
+
+        assert_ne!(runner.output_paths[0], runner.output_paths[1]);
+        assert_eq!(video.path.parent(), Some(runner.output_paths[1].as_path()));
+    }
+
+    #[test]
+    fn non_youtube_download_uses_the_existing_selector_once() {
+        let mut runner = FakeRunner::with_statuses([1, 0]);
+
+        let error = download_with_runner("https://v.redd.it/video", &mut runner).unwrap_err();
+
+        assert_eq!(runner.selectors, ["bv[height<=1080]+ba/best"]);
+        assert!(error.to_string().contains("requested format failed"));
+    }
+
+    #[test]
+    fn youtube_download_reports_the_final_failure_after_exhausting_the_ladder() {
+        let mut runner = FakeRunner::with_statuses([1, 2, 3, 4]);
+
+        let error = download_with_runner("https://youtu.be/video", &mut runner).unwrap_err();
+
+        assert_eq!(runner.selectors, YOUTUBE_FORMATS);
+        assert!(error.to_string().contains("exit status: 4"));
+        assert!(error.to_string().contains("ERROR: requested format failed"));
+    }
+
+    #[test]
+    fn fallback_diagnostic_uses_the_final_error_line() {
+        let output = "ERROR: first cause\nprogress detail\nERROR: final cause\ncleanup detail";
+
+        assert_eq!(fallback_reason(output), Some("ERROR: final cause"));
+    }
+
     #[test]
     fn test_ytdlp_args_use_the_supported_firefox_impersonation_target() {
-        let args = make_ytdlp_args(Path::new("/tmp/output"), "https://example.com/video");
+        let args = make_ytdlp_args(
+            Path::new("/tmp/output"),
+            "https://example.com/video",
+            GENERIC_FORMATS[0],
+        );
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy())
