@@ -34,7 +34,7 @@ tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "sync"] }
 toml = "1.1.4"
 url = "2.5.8"
 xdg = "3.0.0"
-reqwest = { version = "0.13.4", features = ["json", "query"] }
+reqwest = { version = "0.13.5", features = ["json", "query"] }
 
 # Use vendored openssl. We don't depend on it directly.
 openssl = { version = "0.10.75", features = ["vendored"], optional = true }
