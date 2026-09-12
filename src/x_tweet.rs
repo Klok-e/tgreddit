@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
+use log::warn;
 use serde::Deserialize;
+use std::future::Future;
 use url::Url;
 
 use crate::{db::Recordable, types::MediaKind};
@@ -119,18 +121,42 @@ pub async fn fetch(url: &Url, api_base_url: &str) -> Result<Tweet> {
         .user_agent(FXTWITTER_USER_AGENT)
         .build()
         .context("could not construct X Tweet HTTP client")?;
-    let response = client
-        .get(endpoint)
-        .send()
-        .await
-        .context("could not request X Tweet data")?
-        .error_for_status()
-        .context("X Tweet source returned an error")?;
+    let response = retry_once_if(
+        || client.get(endpoint.clone()).send(),
+        |error: &reqwest::Error| {
+            if error.is_connect() {
+                warn!("X Tweet source connection failed; retrying once: {error}");
+                true
+            } else {
+                false
+            }
+        },
+    )
+    .await
+    .context("could not request X Tweet data")?
+    .error_for_status()
+    .context("X Tweet source returned an error")?;
     let body = response
         .text()
         .await
         .context("could not read X Tweet source response")?;
     parse_response(&body)
+}
+
+async fn retry_once_if<T, E, Request, RequestFuture, Retryable>(
+    request: Request,
+    retryable: Retryable,
+) -> std::result::Result<T, E>
+where
+    Request: Fn() -> RequestFuture,
+    RequestFuture: Future<Output = std::result::Result<T, E>>,
+    Retryable: Fn(&E) -> bool,
+{
+    match request().await {
+        Ok(value) => Ok(value),
+        Err(error) if retryable(&error) => request().await,
+        Err(error) => Err(error),
+    }
 }
 
 fn tweet_id(url: &Url) -> Result<&str> {
@@ -215,6 +241,101 @@ fn normalize_media(media: FxMediaItem) -> Result<TweetMedia> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum TestRequestError {
+        Connect,
+        Other,
+    }
+
+    #[tokio::test]
+    async fn retries_a_connect_failure_once() {
+        let attempts = AtomicUsize::new(0);
+        let outcomes = Mutex::new(VecDeque::from([
+            Err(TestRequestError::Connect),
+            Ok("response"),
+        ]));
+
+        let result = retry_once_if(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                std::future::ready(
+                    outcomes
+                        .lock()
+                        .expect("outcomes lock is available")
+                        .pop_front()
+                        .expect("each attempt has an outcome"),
+                )
+            },
+            |error| *error == TestRequestError::Connect,
+        )
+        .await;
+
+        assert_eq!(result, Ok("response"));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_a_second_connect_failure() {
+        let attempts = AtomicUsize::new(0);
+        let outcomes = Mutex::new(VecDeque::<std::result::Result<(), TestRequestError>>::from(
+            [
+                Err(TestRequestError::Connect),
+                Err(TestRequestError::Connect),
+            ],
+        ));
+
+        let result = retry_once_if(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                std::future::ready(
+                    outcomes
+                        .lock()
+                        .expect("outcomes lock is available")
+                        .pop_front()
+                        .expect("each attempt has an outcome"),
+                )
+            },
+            |error| *error == TestRequestError::Connect,
+        )
+        .await;
+
+        assert_eq!(result, Err(TestRequestError::Connect));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn returns_non_connect_failure_without_retrying() {
+        let attempts = AtomicUsize::new(0);
+        let outcomes = Mutex::new(VecDeque::<std::result::Result<(), TestRequestError>>::from(
+            [Err(TestRequestError::Other)],
+        ));
+
+        let result = retry_once_if(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                std::future::ready(
+                    outcomes
+                        .lock()
+                        .expect("outcomes lock is available")
+                        .pop_front()
+                        .expect("each attempt has an outcome"),
+                )
+            },
+            |error| *error == TestRequestError::Connect,
+        )
+        .await;
+
+        assert_eq!(result, Err(TestRequestError::Other));
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn normalizes_source_media_and_a_single_quote() {
