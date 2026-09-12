@@ -12,6 +12,8 @@ use std::string::ToString;
 use std::{convert::TryFrom, sync::Mutex};
 use teloxide::types::{FileId, FileUniqueId, InlineKeyboardMarkup, MessageId};
 
+use crate::types::{MediaKind, TelegramMediaFile};
+
 const MIGRATIONS: &[&str] = &[
     "
     create table post(
@@ -184,6 +186,10 @@ const MIGRATIONS: &[&str] = &[
     ",
     "
     alter table review_post_new rename to review_post;
+    ",
+    "
+    alter table telegram_file
+    add column media_kind text not null default 'photo' check (media_kind in ('photo', 'video'));
     ",
 ];
 
@@ -492,12 +498,13 @@ impl Database {
         chat_id: i64,
         telegram_file_id: &FileId,
         telegram_unique_file_id: &FileUniqueId,
+        media_kind: MediaKind,
     ) -> Result<()> {
         let conn = &self.conn.lock().expect("No poison");
         let mut stmt = conn.prepare(
             "
-            insert or ignore into telegram_file (post_id, chat_id, telegram_file_id, telegram_file_unique_id)
-            values (:post_id, :chat_id, :telegram_file_id, :telegram_file_unique_id)
+            insert or ignore into telegram_file (post_id, chat_id, telegram_file_id, telegram_file_unique_id, media_kind)
+            values (:post_id, :chat_id, :telegram_file_id, :telegram_file_unique_id, :media_kind)
             ",
         )?;
         stmt.execute(named_params! {
@@ -505,16 +512,21 @@ impl Database {
             ":chat_id": chat_id,
             ":telegram_file_id": telegram_file_id.0,
             ":telegram_file_unique_id": telegram_unique_file_id.0,
+            ":media_kind": media_kind.as_db_value(),
         })
         .context("could not add telegram file")
         .map(|_| ())
     }
 
-    pub fn get_telegram_files_for_post(&self, post_id: &str, chat_id: i64) -> Result<Vec<FileId>> {
+    pub fn get_telegram_files_for_post(
+        &self,
+        post_id: &str,
+        chat_id: i64,
+    ) -> Result<Vec<TelegramMediaFile>> {
         let conn = &self.conn.lock().expect("No poison");
         let mut stmt = conn.prepare(
             "
-            select telegram_file_id
+            select telegram_file_id, media_kind
             from telegram_file
             where post_id = :post_id and chat_id = :chat_id
             order by telegram_file.id
@@ -527,12 +539,26 @@ impl Database {
                     ":post_id": post_id,
                     ":chat_id": chat_id,
                 },
-                |row| row.get("telegram_file_id"),
+                |row| {
+                    let file_id: String = row.get("telegram_file_id")?;
+                    let media_kind: String = row.get("media_kind")?;
+                    let kind = MediaKind::from_db_value(&media_kind).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            format!("unsupported stored media kind {media_kind:?}").into(),
+                        )
+                    })?;
+                    Ok(TelegramMediaFile {
+                        file_id: file_id.into(),
+                        kind,
+                    })
+                },
             )
             .context("could not retrieve telegram files")?;
 
-        let telegram_files: Result<Vec<String>, _> = rows.collect();
-        Ok(telegram_files?.into_iter().map(|x| x.into()).collect())
+        let telegram_files: Result<Vec<TelegramMediaFile>, _> = rows.collect();
+        Ok(telegram_files?)
     }
 
     pub fn upsert_review_post(&self, review: &ReviewPost) -> Result<()> {
@@ -932,8 +958,13 @@ impl TryFrom<&Row<'_>> for Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reddit::PostType;
-    use teloxide::types::{InlineKeyboardButton, MessageEntity, MessageEntityKind};
+    use crate::{
+        reddit::PostType,
+        types::{MediaKind, TelegramMediaFile},
+    };
+    use teloxide::types::{
+        FileId, FileUniqueId, InlineKeyboardButton, MessageEntity, MessageEntityKind,
+    };
 
     fn test_post() -> Post {
         Post {
@@ -978,6 +1009,41 @@ mod tests {
         db.record_post_seen_with_current_time(1, &test_post())
             .unwrap();
         db
+    }
+
+    #[test]
+    fn gallery_file_media_kinds_round_trip_in_delivery_order() {
+        let db = migrated_db_with_post();
+        db.add_telegram_file(
+            "v6nu75",
+            1,
+            &FileId::from("photo-file"),
+            &FileUniqueId::from("photo-unique"),
+            MediaKind::Photo,
+        )
+        .unwrap();
+        db.add_telegram_file(
+            "v6nu75",
+            1,
+            &FileId::from("video-file"),
+            &FileUniqueId::from("video-unique"),
+            MediaKind::Video,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_telegram_files_for_post("v6nu75", 1).unwrap(),
+            vec![
+                TelegramMediaFile {
+                    file_id: FileId::from("photo-file"),
+                    kind: MediaKind::Photo,
+                },
+                TelegramMediaFile {
+                    file_id: FileId::from("video-file"),
+                    kind: MediaKind::Video,
+                },
+            ]
+        );
     }
 
     #[test]

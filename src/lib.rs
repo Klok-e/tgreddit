@@ -7,6 +7,7 @@ pub mod handle_post;
 pub mod messages;
 pub mod reddit;
 pub mod types;
+pub mod x_tweet;
 pub mod ytdlp;
 
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");

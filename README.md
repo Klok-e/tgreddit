@@ -38,6 +38,12 @@ cargo clippy
 cargo test
 ```
 
+The X Tweet provider contract test is ignored because it calls FxTwitter. Run it from the local workstation when validating X Tweet support:
+
+```sh
+cargo test --test x_tweet_live -- --ignored --nocapture
+```
+
 Live Telegram E2E tests are ignored because they use real network, Reddit
 fixtures, and the configured Telegram test channel. They read app settings from
 `tgreddit.toml` and the target chat from `telegram-e2e.toml`.
@@ -87,7 +93,7 @@ return new posts.
 
 Every private Reddit review message shows one visible, clickable link to the Reddit post. Directly submitted media shows its submitted URL. Media and galleries include **Post**, **Post (no caption)**, and **Post (with link)** buttons. Link and self-text posts include **Post** and **Post (with link)**.
 
-For a direct X/Twitter status video, the default Repost Caption is the X Tweet Body resolved by `yt-dlp`: it keeps line breaks and non-`t.co` links, but removes all `t.co` URLs. If it cannot fit Telegram's media-caption limit with the visible source link, TGReddit shortens it at a Unicode boundary and adds an ellipsis. A Tweet Body made only of `t.co` URLs produces no caption; missing metadata falls back to the downloaded video's title.
+For an X/Twitter Tweet, TGReddit fetches text and attached media through the configured FxTwitter-compatible API. It posts every source Tweet photo and video in order, while a directly quoted Tweet contributes labeled text only. The Repost Caption keeps line breaks and non-`t.co` links but removes all `t.co` URLs. If it cannot fit Telegram's media-caption limit with the visible source link, TGReddit shortens it at a Unicode boundary and adds an ellipsis. A Tweet without source media produces a text Review Post.
 
 **Post** selects the current Repost Caption. **Post (no caption)** selects media without a caption. **Post (with link)** appends a blank line and the exact Source URL; this is the submitted download URL for directly downloaded media and the Reddit submission permalink for galleries and self-text posts.
 
@@ -95,7 +101,7 @@ Choosing a variant replaces the review keyboard with a variant-specific **Confir
 
 Only one edit can be active per private chat. Starting another edit cancels the previous prompt. Completed captions, rich-text formatting, Source URLs, review targets, and pending confirmation choices are stored in SQLite so review posts remain usable after a restart; unfinished ForceReply prompts may be cancelled by a restart.
 
-Telegram limits media captions to 1,024 UTF-16 units and text messages to 4,096. TGReddit reserves room for the visible post link and the Source URL before accepting an edit, reports the available limit when a reply is too long, and never truncates an edited caption or URL. The initial automatic caption for an over-limit direct X/Twitter video is the exception: it is shortened with an ellipsis as described above.
+Telegram limits media captions to 1,024 UTF-16 units and text messages to 4,096. TGReddit reserves room for the visible post link and the Source URL before accepting an edit, reports the available limit when a reply is too long, and never truncates an edited caption or URL. The initial automatic caption for an over-limit X/Twitter Tweet is the exception: it is shortened with an ellipsis as described above.
 
 After successful publication, the bot removes the review buttons to prevent duplicate posts. Cancellation restores the previous keyboard, and a Telegram publication failure preserves the edited caption and restores the keyboard for retrying.
 
@@ -132,6 +138,11 @@ check_interval_secs = 600
 # messages when a new subreddit is added.
 # Optional. Defaults to true.
 skip_initial_send = true
+
+# FxTwitter-compatible API used to retrieve X Tweet text, photos, and videos.
+# Optional. Defaults to https://api.fxtwitter.com. Set this to a self-hosted
+# FxTwitter-compatible instance to keep X Tweet lookups on infrastructure you control.
+x_tweet_api_base_url = "https://api.fxtwitter.com"
 
 # Set the post comments links to use an alternative frontend. Useful as the
 # official Reddit web app is increasingly user hostile on mobile. Possible

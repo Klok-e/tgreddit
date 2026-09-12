@@ -6,7 +6,36 @@ use crate::{
     reddit::{PostType, TopPostsTimePeriod},
 };
 use std::path::PathBuf;
-use teloxide::types::{InlineKeyboardMarkup, MessageEntity, MessageId};
+use teloxide::types::{FileId, InlineKeyboardMarkup, MessageEntity, MessageId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Photo,
+    Video,
+}
+
+impl MediaKind {
+    pub(crate) const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Photo => "photo",
+            Self::Video => "video",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Option<Self> {
+        match value {
+            "photo" => Some(Self::Photo),
+            "video" => Some(Self::Video),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramMediaFile {
+    pub file_id: FileId,
+    pub kind: MediaKind,
+}
 
 #[derive(Debug)]
 pub struct Video {
@@ -14,10 +43,6 @@ pub struct Video {
     pub url: String,
     pub id: String,
     pub title: String,
-    /// Extractor-supplied long-form description, when available.
-    pub description: Option<String>,
-    /// Source-status description for an X status, when available.
-    pub source_description: Option<String>,
     pub width: u16,
     pub height: u16,
     pub _video_tempdir: TempDir,

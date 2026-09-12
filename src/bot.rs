@@ -1,13 +1,15 @@
 use crate::{
     config, db,
-    handle_post::{DeliveredMessages, handle_new_post, handle_video_link, process_post},
+    handle_post::{
+        DeliveredMessages, handle_new_post, handle_video_link, handle_x_tweet_link, process_post,
+    },
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
     types::{
-        PublishVariant, RepostAction, ReviewContentKind, ReviewPost, RichText, SubscriptionArgs,
-        decode_repost_callback,
+        MediaKind, PublishVariant, RepostAction, ReviewContentKind, ReviewPost, RichText,
+        SubscriptionArgs, TelegramMediaFile, decode_repost_callback,
     },
-    ytdlp,
+    x_tweet,
 };
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -21,7 +23,7 @@ use teloxide::{
     dptree,
     prelude::*,
     types::{
-        CallbackQuery, ChatId, FileId, ForceReply, InlineKeyboardMarkup, InputFile, InputMedia,
+        CallbackQuery, ChatId, ForceReply, InlineKeyboardMarkup, InputFile, InputMedia,
         InputMediaPhoto, Message, MessageEntity, MessageEntityKind, MessageEntityRef, MessageId,
         Update,
     },
@@ -33,7 +35,7 @@ const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
 type CaptionEditStore = Arc<Mutex<HashMap<i64, CaptionEditState>>>;
 
 const GENERIC_USER_ERROR: &str = "The requested operation could not be completed.";
-const NO_DOWNLOADABLE_X_VIDEO: &str = "This X status has no downloadable video.";
+const UNRETRIEVABLE_X_TWEET: &str = "The X Tweet could not be retrieved.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -59,9 +61,11 @@ fn user_message(message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
-fn direct_media_user_error(is_twitter_status: bool, error: anyhow::Error) -> anyhow::Error {
-    let message = if is_twitter_status && ytdlp::is_confirmed_no_video(&error) {
-        NO_DOWNLOADABLE_X_VIDEO
+fn direct_media_user_error(is_x_tweet: bool, error: anyhow::Error) -> anyhow::Error {
+    let message = if is_x_tweet && x_tweet::is_retrieval_error(&error) {
+        UNRETRIEVABLE_X_TWEET
+    } else if is_x_tweet {
+        "The X Tweet could not be processed."
     } else {
         "The video link could not be processed."
     };
@@ -427,14 +431,20 @@ async fn handle_no_command(
 
         let db = db::Database::open(config)
             .map_err(|err| user_error("The local database could not be accessed.", err))?;
-        if let Some(link) = parse_twitter_status_url(text) {
-            handle_video_link(&db, tg, message.chat.id.0, &link, true)
-                .await
-                .map_err(|err| direct_media_user_error(true, err))?;
+        if let Some(link) = parse_x_tweet_url(text) {
+            handle_x_tweet_link(
+                &db,
+                tg,
+                message.chat.id.0,
+                &link,
+                &config.x_tweet_api_base_url,
+            )
+            .await
+            .map_err(|err| direct_media_user_error(true, err))?;
         } else if is_youtube_url(text) {
             let link =
                 Url::parse(text).map_err(|err| user_error("The video link is invalid.", err))?;
-            handle_video_link(&db, tg, message.chat.id.0, &link, false)
+            handle_video_link(&db, tg, message.chat.id.0, &link)
                 .await
                 .map_err(|err| direct_media_user_error(false, err))?;
         } else {
@@ -445,7 +455,7 @@ async fn handle_no_command(
             else {
                 tg.send_message(
                     message.chat.id,
-                    "Send a Reddit post URL, X/Twitter status URL, YouTube URL, or a bot command.",
+                    "Send a Reddit post URL, X/Twitter Tweet URL, YouTube URL, or a bot command.",
                 )
                 .await?;
                 return Ok(());
@@ -622,25 +632,40 @@ async fn handle_repost_gallery(
     db: db::Database,
     chat_id: ChatId,
     tg: &Bot,
-    gallery_file_ids: Vec<FileId>,
+    gallery_files: Vec<TelegramMediaFile>,
     post_caption: Option<&RichText>,
 ) -> Result<()> {
     let mut media_group = vec![];
     let mut first = true;
 
-    for file_id in gallery_file_ids {
-        let mut input_media_photo = InputMediaPhoto::new(InputFile::file_id(file_id));
-        // The first media item carries the caption for the whole gallery.
-        if first {
-            if let Some(caption) = post_caption {
-                input_media_photo = input_media_photo
-                    .caption(&caption.text)
-                    .caption_entities(caption.entities.clone());
+    for media in gallery_files {
+        match media.kind {
+            MediaKind::Photo => {
+                let mut item = InputMediaPhoto::new(InputFile::file_id(media.file_id));
+                if first {
+                    if let Some(caption) = post_caption {
+                        item = item
+                            .caption(&caption.text)
+                            .caption_entities(caption.entities.clone());
+                    }
+                    first = false;
+                }
+                media_group.push(InputMedia::Photo(item));
             }
-            first = false;
+            MediaKind::Video => {
+                let mut item =
+                    teloxide::types::InputMediaVideo::new(InputFile::file_id(media.file_id));
+                if first {
+                    if let Some(caption) = post_caption {
+                        item = item
+                            .caption(&caption.text)
+                            .caption_entities(caption.entities.clone());
+                    }
+                    first = false;
+                }
+                media_group.push(InputMedia::Video(item));
+            }
         }
-
-        media_group.push(InputMedia::Photo(input_media_photo))
     }
 
     let repost_channel_id = repost_channel_id(&db, chat_id)?;
@@ -1155,9 +1180,9 @@ async fn callback_handler_inner(
 }
 
 /// Return the first http(s) URL in `text` if it points at a Twitter/X
-/// status page (i.e. `/{user}/status/{id}` on `twitter.com`,
+/// Tweet page (i.e. `/{user}/status/{id}` on `twitter.com`,
 /// `mobile.twitter.com`, or `x.com`).
-fn parse_twitter_status_url(text: &str) -> Option<Url> {
+fn parse_x_tweet_url(text: &str) -> Option<Url> {
     let token = text
         .split_whitespace()
         .find(|tok| tok.starts_with("http://") || tok.starts_with("https://"))?;
@@ -1277,63 +1302,63 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_twitter_status_url_accepts_twitter_status() {
-        let url = parse_twitter_status_url("https://twitter.com/someuser/status/1234567890")
-            .expect("twitter.com status URL should be accepted");
+    fn parse_x_tweet_url_accepts_twitter_tweet() {
+        let url = parse_x_tweet_url("https://twitter.com/someuser/status/1234567890")
+            .expect("twitter.com Tweet URL should be accepted");
         assert_eq!(url.host_str(), Some("twitter.com"));
         assert_eq!(url.path(), "/someuser/status/1234567890");
     }
 
     #[test]
-    fn test_parse_twitter_status_url_accepts_mobile_twitter_status() {
-        let url = parse_twitter_status_url("https://mobile.twitter.com/someuser/status/1234567890")
-            .expect("mobile.twitter.com status URL should be accepted");
+    fn parse_x_tweet_url_accepts_mobile_twitter_tweet() {
+        let url = parse_x_tweet_url("https://mobile.twitter.com/someuser/status/1234567890")
+            .expect("mobile.twitter.com Tweet URL should be accepted");
         assert_eq!(url.host_str(), Some("mobile.twitter.com"));
     }
 
     #[test]
-    fn test_parse_twitter_status_url_accepts_x_status() {
-        let url = parse_twitter_status_url("https://x.com/someuser/status/1234567890")
-            .expect("x.com status URL should be accepted");
+    fn parse_x_tweet_url_accepts_x_tweet() {
+        let url = parse_x_tweet_url("https://x.com/someuser/status/1234567890")
+            .expect("x.com Tweet URL should be accepted");
         assert_eq!(url.host_str(), Some("x.com"));
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_twitter_profile() {
-        assert!(parse_twitter_status_url("https://twitter.com/someuser").is_none());
+    fn parse_x_tweet_url_rejects_twitter_profile() {
+        assert!(parse_x_tweet_url("https://twitter.com/someuser").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_twitter_search() {
-        assert!(parse_twitter_status_url("https://twitter.com/search?q=hello").is_none());
+    fn parse_x_tweet_url_rejects_twitter_search() {
+        assert!(parse_x_tweet_url("https://twitter.com/search?q=hello").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_twitter_home() {
-        assert!(parse_twitter_status_url("https://twitter.com/").is_none());
-        assert!(parse_twitter_status_url("https://twitter.com").is_none());
+    fn parse_x_tweet_url_rejects_twitter_home() {
+        assert!(parse_x_tweet_url("https://twitter.com/").is_none());
+        assert!(parse_x_tweet_url("https://twitter.com").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_unrelated_hosts() {
-        assert!(parse_twitter_status_url("https://example.com/foo/status/1").is_none());
-        assert!(parse_twitter_status_url("https://x.com.evil.example/foo").is_none());
+    fn parse_x_tweet_url_rejects_unrelated_hosts() {
+        assert!(parse_x_tweet_url("https://example.com/foo/status/1").is_none());
+        assert!(parse_x_tweet_url("https://x.com.evil.example/foo").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_status_with_extra_path() {
-        assert!(parse_twitter_status_url("https://twitter.com/user/status/123/photo/1").is_none());
+    fn parse_x_tweet_url_rejects_tweet_with_extra_path() {
+        assert!(parse_x_tweet_url("https://twitter.com/user/status/123/photo/1").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_rejects_status_with_empty_id() {
-        assert!(parse_twitter_status_url("https://twitter.com/user/status/").is_none());
+    fn parse_x_tweet_url_rejects_tweet_with_empty_id() {
+        assert!(parse_x_tweet_url("https://twitter.com/user/status/").is_none());
     }
 
     #[test]
-    fn test_parse_twitter_status_url_ignores_non_url_text() {
-        assert!(parse_twitter_status_url("just some text").is_none());
-        assert!(parse_twitter_status_url("twitter.com/user/status/1").is_none());
+    fn parse_x_tweet_url_ignores_non_url_text() {
+        assert!(parse_x_tweet_url("just some text").is_none());
+        assert!(parse_x_tweet_url("twitter.com/user/status/1").is_none());
     }
 
     #[test]
@@ -1423,14 +1448,17 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_x_no_video_uses_the_unavailable_submission_message() {
-        let confirmed = direct_media_user_error(true, ytdlp::NoDownloadableVideo.into());
+    fn unretrievable_x_tweet_uses_the_factual_submission_message() {
+        let confirmed = direct_media_user_error(
+            true,
+            x_tweet::retrieval_error(anyhow::anyhow!("provider returned HTTP 502")),
+        );
         assert_eq!(
             user_facing_message_or(&confirmed, GENERIC_USER_ERROR),
-            NO_DOWNLOADABLE_X_VIDEO
+            UNRETRIEVABLE_X_TWEET
         );
 
-        let non_x = direct_media_user_error(false, ytdlp::NoDownloadableVideo.into());
+        let non_x = direct_media_user_error(false, anyhow::anyhow!("media download failed"));
         assert_eq!(
             user_facing_message_or(&non_x, GENERIC_USER_ERROR),
             "The video link could not be processed."
@@ -1439,7 +1467,7 @@ mod tests {
         let transient = direct_media_user_error(true, anyhow::anyhow!("network timeout"));
         assert_eq!(
             user_facing_message_or(&transient, GENERIC_USER_ERROR),
-            "The video link could not be processed."
+            "The X Tweet could not be processed."
         );
     }
 

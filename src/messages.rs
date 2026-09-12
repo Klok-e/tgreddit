@@ -118,7 +118,7 @@ pub fn append_source_url(caption: &RichText, source_url: &str) -> RichText {
     result
 }
 
-fn format_review_url(url: &str) -> RichText {
+pub fn format_review_url(url: &str) -> RichText {
     RichText {
         text: url.to_owned(),
         entities: vec![MessageEntity::new(

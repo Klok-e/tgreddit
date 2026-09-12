@@ -11,6 +11,7 @@ use crate::{
 const CONFIG_PATH_ENV: &str = "CONFIG_PATH";
 pub const DEFAULT_LIMIT: u32 = 1;
 pub const DEFAULT_TIME_PERIOD: TopPostsTimePeriod = TopPostsTimePeriod::Day;
+pub const DEFAULT_X_TWEET_API_BASE_URL: &str = "https://api.fxtwitter.com";
 
 #[derive(Deserialize, Debug, Default)]
 pub struct Config {
@@ -25,6 +26,8 @@ pub struct Config {
     pub default_limit: Option<u32>,
     pub default_time: Option<TopPostsTimePeriod>,
     pub default_filter: Option<PostType>,
+    #[serde(default = "default_x_tweet_api_base_url")]
+    pub x_tweet_api_base_url: String,
 }
 
 pub fn read_config() -> Config {
@@ -45,4 +48,27 @@ fn default_db_path() -> PathBuf {
 
 fn default_skip_initial_send() -> bool {
     true
+}
+
+fn default_x_tweet_api_base_url() -> String {
+    DEFAULT_X_TWEET_API_BASE_URL.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x_tweet_api_defaults_to_fxtwitter() {
+        let config: Config = toml::from_str(
+            r#"
+                authorized_user_ids = []
+                telegram_bot_token = "token"
+                check_interval_secs = 60
+            "#,
+        )
+        .expect("minimal configuration is valid");
+
+        assert_eq!(config.x_tweet_api_base_url, DEFAULT_X_TWEET_API_BASE_URL);
+    }
 }

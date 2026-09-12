@@ -5,3 +5,8 @@ check_interval_secs = 600
 skip_initial_send = true
 default_limit = 5
 default_time = "week"
+
+# FxTwitter-compatible API used to retrieve X Tweet text, photos, and videos.
+# Optional. Defaults to https://api.fxtwitter.com. Set this to a self-hosted
+# FxTwitter-compatible instance to keep X Tweet lookups on infrastructure you control.
+x_tweet_api_base_url = "https://api.fxtwitter.com"
