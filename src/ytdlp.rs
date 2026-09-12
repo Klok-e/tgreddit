@@ -26,7 +26,18 @@ const GENERIC_FORMATS: &[&str] = &["bv[height<=1080]+ba/best"];
 
 #[derive(Deserialize)]
 struct YtdlpInfo {
+    id: Option<String>,
     description: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("yt-dlp confirmed that the X status has no downloadable video")]
+pub struct NoDownloadableVideo;
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct VideoDescriptions {
+    selected_media: Option<String>,
+    source_status: Option<String>,
 }
 
 fn format_selectors(url: &str) -> &'static [&'static str] {
@@ -49,8 +60,24 @@ fn fallback_reason(output: &str) -> Option<&str> {
     output.lines().rev().find(|line| line.starts_with("ERROR:"))
 }
 
-fn make_ytdlp_args(output: &Path, url: &str, format_selector: &str) -> Vec<OsString> {
-    vec![
+fn is_confirmed_twitter_no_video(reason: &str) -> bool {
+    reason.starts_with("ERROR: [twitter]")
+        && reason.contains(": No video could be found in this tweet")
+}
+
+pub fn is_confirmed_no_video(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<NoDownloadableVideo>().is_some())
+}
+
+fn make_ytdlp_args(
+    output: &Path,
+    url: &str,
+    format_selector: &str,
+    is_direct_media_submission: bool,
+) -> Vec<OsString> {
+    let mut args = vec![
         "--impersonate".into(),
         "Firefox-135".into(),
         "--paths".into(),
@@ -66,9 +93,14 @@ fn make_ytdlp_args(output: &Path, url: &str, format_selector: &str) -> Vec<OsStr
         "--recode".into(),
         "mp4".into(),
         "--write-info-json".into(),
-        "--no-playlist".into(),
-        url.into(),
-    ]
+    ];
+    if is_direct_media_submission {
+        args.extend(["--playlist-items".into(), "1".into()]);
+    } else {
+        args.push("--no-playlist".into());
+    }
+    args.push(url.into());
+    args
 }
 
 trait YtdlpRunner {
@@ -87,19 +119,28 @@ impl YtdlpRunner for CommandYtdlpRunner {
     }
 }
 
-/// Downloads given url with yt-dlp and returns path to video
+/// Downloads media attached to a Reddit post with yt-dlp and returns its video.
 pub fn download(url: &str) -> Result<Video> {
-    download_with_runner(url, &mut CommandYtdlpRunner)
+    download_with_runner(url, false, &mut CommandYtdlpRunner)
 }
 
-fn download_with_runner(url: &str, runner: &mut impl YtdlpRunner) -> Result<Video> {
+/// Downloads a Direct Media Submission and returns its first extractor item.
+pub fn download_direct(url: &str) -> Result<Video> {
+    download_with_runner(url, true, &mut CommandYtdlpRunner)
+}
+
+fn download_with_runner(
+    url: &str,
+    is_direct_media_submission: bool,
+    runner: &mut impl YtdlpRunner,
+) -> Result<Video> {
     let tmp_dir = TempDir::with_prefix("tgreddit")?;
     let selectors = format_selectors(url);
 
     for (attempt, selector) in selectors.iter().enumerate() {
         let attempt_path = tmp_dir.path().join(format!("attempt-{attempt}"));
         fs::create_dir(&attempt_path).context("Could not create yt-dlp attempt directory")?;
-        let ytdlp_args = make_ytdlp_args(&attempt_path, url, selector);
+        let ytdlp_args = make_ytdlp_args(&attempt_path, url, selector, is_direct_media_submission);
 
         info!("running yt-dlp with arguments {ytdlp_args:?}");
         let output = runner.run(&ytdlp_args).context("Failed to run yt-dlp")?;
@@ -110,10 +151,13 @@ fn download_with_runner(url: &str, runner: &mut impl YtdlpRunner) -> Result<Vide
         }
 
         if output.status.success() {
-            return video_from_download(url, tmp_dir, attempt_path);
+            return video_from_download(url, is_direct_media_submission, tmp_dir, attempt_path);
         }
 
         let error_line = fallback_reason(&stdout);
+        if is_direct_media_submission && error_line.is_some_and(is_confirmed_twitter_no_video) {
+            return Err(NoDownloadableVideo.into());
+        }
         let reason = error_line
             .map(|line| format!(": {line}"))
             .unwrap_or_default();
@@ -138,19 +182,34 @@ fn download_with_runner(url: &str, runner: &mut impl YtdlpRunner) -> Result<Vide
     anyhow::bail!("yt-dlp exhausted all format selectors")
 }
 
-fn video_from_download(url: &str, tmp_dir: TempDir, successful_path: PathBuf) -> Result<Video> {
+fn video_from_download(
+    url: &str,
+    is_direct_media_submission: bool,
+    tmp_dir: TempDir,
+    successful_path: PathBuf,
+) -> Result<Video> {
     // yt-dlp is expected to write a single file, which is the video, to its attempt directory.
     let video_path = get_video_path(&successful_path)?;
 
     let (title, id, width, height) =
         parse_metadata_from_path(&video_path).context("Video filename should have dimensions")?;
-    let description = description_from_info_json(&successful_path, &video_path)?;
+    let source_status_id = is_direct_media_submission
+        .then(|| x_status_id(url))
+        .flatten();
+    let descriptions = descriptions_from_info_json(
+        &successful_path,
+        &id,
+        source_status_id.as_deref(),
+        is_direct_media_submission,
+        url,
+    );
 
     let video = Video {
         path: video_path,
         url: url.to_owned(),
         title,
-        description,
+        description: descriptions.selected_media,
+        source_description: descriptions.source_status,
         id,
         width,
         height,
@@ -193,66 +252,111 @@ fn get_video_path(dir: &Path) -> Result<PathBuf> {
         .context("No recoded MP4 video file in temp dir")
 }
 
-/// Read yt-dlp's structured description for the selected media file.
-///
-/// `--write-info-json` must produce exactly one sidecar per attempt. Matching
-/// its basename to the selected MP4 prevents an unrelated leftover sidecar from
-/// becoming the video's caption metadata.
-fn description_from_info_json(dir: &Path, video_path: &Path) -> Result<Option<String>> {
-    let info_paths: Vec<PathBuf> = fs::read_dir(dir)
-        .context("Could not read yt-dlp metadata directory")?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(".info.json"))
-        })
-        .collect();
-
-    let [info_path] = info_paths.as_slice() else {
-        anyhow::bail!(
-            "Expected exactly one yt-dlp .info.json metadata sidecar in {}, found {}",
-            dir.display(),
-            info_paths.len()
-        );
+/// Read yt-dlp metadata as optional caption enrichment for a downloaded item.
+fn descriptions_from_info_json(
+    dir: &Path,
+    selected_media_id: &str,
+    source_status_id: Option<&str>,
+    is_direct_media_submission: bool,
+    submitted_url: &str,
+) -> VideoDescriptions {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!("yt-dlp metadata for {submitted_url} is unavailable: {err}");
+            return VideoDescriptions::default();
+        }
     };
 
-    let video_stem = video_path
-        .file_stem()
-        .context("Downloaded video has no filename stem")?;
-    let info_name = info_path
-        .file_name()
-        .context("yt-dlp metadata sidecar has no filename")?
-        .to_string_lossy();
-    let info_stem = info_name
-        .strip_suffix(".info.json")
-        .context("yt-dlp metadata sidecar does not end in .info.json")?;
+    let mut descriptions = VideoDescriptions::default();
+    let mut selected_media_found = false;
+    let mut source_status_found = source_status_id.is_none();
+    let mut metadata_problems = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(err) => {
+                metadata_problems.push(err.to_string());
+                continue;
+            }
+        };
+        if !path.is_file()
+            || !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".info.json"))
+        {
+            continue;
+        }
 
-    if info_stem != video_stem.to_string_lossy() {
-        anyhow::bail!(
-            "yt-dlp metadata sidecar {} does not match downloaded video {}",
-            info_path.display(),
-            video_path.display()
+        let info = match read_info_json(&path) {
+            Ok(info) => info,
+            Err(err) => {
+                metadata_problems.push(format!("{err:#}"));
+                continue;
+            }
+        };
+        let Some(id) = info.id else {
+            metadata_problems.push(format!("{} has no media id", path.display()));
+            continue;
+        };
+
+        if id == selected_media_id {
+            selected_media_found = true;
+            descriptions.selected_media = info.description.clone();
+        }
+        if source_status_id.is_some_and(|source_status_id| id == source_status_id) {
+            source_status_found = true;
+            descriptions.source_status = info.description;
+        }
+    }
+
+    if is_direct_media_submission && !selected_media_found {
+        metadata_problems.push(format!(
+            "no sidecar matches downloaded media item {selected_media_id}"
+        ));
+    }
+    if let Some(source_status_id) = source_status_id
+        && !source_status_found
+    {
+        metadata_problems.push(format!("no sidecar matches X status {source_status_id}"));
+    }
+    if !metadata_problems.is_empty() {
+        warn!(
+            "yt-dlp metadata for {submitted_url} is unavailable: {}",
+            metadata_problems.join("; ")
         );
     }
 
-    let file = fs::File::open(info_path).with_context(|| {
-        format!(
-            "Could not open yt-dlp metadata sidecar {}",
-            info_path.display()
-        )
-    })?;
-    let info: YtdlpInfo = serde_json::from_reader(file).with_context(|| {
-        format!(
-            "Could not parse yt-dlp metadata sidecar {}",
-            info_path.display()
-        )
-    })?;
+    descriptions
+}
 
-    Ok(info.description)
+fn read_info_json(path: &Path) -> Result<YtdlpInfo> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("Could not open yt-dlp metadata sidecar {}", path.display()))?;
+    serde_json::from_reader(file)
+        .with_context(|| format!("Could not parse yt-dlp metadata sidecar {}", path.display()))
+}
+
+fn x_status_id(url: &str) -> Option<String> {
+    let url = Url::parse(url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    if !matches!(
+        host.as_str(),
+        "twitter.com" | "mobile.twitter.com" | "x.com"
+    ) {
+        return None;
+    }
+
+    let mut segments = url.path_segments()?.filter(|segment| !segment.is_empty());
+    let _user = segments.next()?;
+    if segments.next()? != "status" {
+        return None;
+    }
+    let id = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    Some(id.to_owned())
 }
 
 fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
@@ -279,9 +383,9 @@ fn parse_metadata_from_path(path: &Path) -> Option<(String, String, u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GENERIC_FORMATS, YOUTUBE_FORMATS, YtdlpRunner, description_from_info_json,
-        download_with_runner, fallback_reason, format_selectors, get_video_path, make_ytdlp_args,
-        parse_metadata_from_path,
+        GENERIC_FORMATS, YOUTUBE_FORMATS, YtdlpRunner, download_with_runner, fallback_reason,
+        format_selectors, get_video_path, is_confirmed_no_video, make_ytdlp_args,
+        parse_metadata_from_path, video_from_download, x_status_id,
     };
     use std::collections::VecDeque;
     use std::ffi::OsString;
@@ -322,7 +426,7 @@ mod tests {
                 fs::write(output_path.join("video_[id]_1280x720.mp4"), [])?;
                 fs::write(
                     output_path.join("video_[id]_1280x720.info.json"),
-                    r#"{"description":"Full description\nwith Unicode: Привіт"}"#,
+                    r#"{"id":"id","description":"Full description\nwith Unicode: Привіт"}"#,
                 )?;
             } else {
                 fs::write(output_path.join("partial.part"), [])?;
@@ -377,7 +481,7 @@ mod tests {
     fn youtube_download_falls_back_after_a_failed_attempt() {
         let mut runner = FakeRunner::with_statuses([1, 0]);
 
-        let video = download_with_runner("https://youtu.be/video", &mut runner).unwrap();
+        let video = download_with_runner("https://youtu.be/video", false, &mut runner).unwrap();
 
         assert_eq!(video.title, "video");
         assert_eq!(
@@ -397,6 +501,22 @@ mod tests {
         calls: usize,
     }
 
+    struct StaticFailingRunner {
+        calls: usize,
+        stdout: Vec<u8>,
+    }
+
+    impl YtdlpRunner for StaticFailingRunner {
+        fn run(&mut self, _args: &[OsString]) -> io::Result<Output> {
+            self.calls += 1;
+            Ok(Output {
+                status: ExitStatus::from_raw(1 << 8),
+                stdout: self.stdout.clone(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
     impl YtdlpRunner for LaunchFailingRunner {
         fn run(&mut self, _args: &[OsString]) -> io::Result<Output> {
             self.calls += 1;
@@ -408,8 +528,8 @@ mod tests {
     fn yt_dlp_launch_failure_stops_without_trying_another_format() {
         let mut runner = LaunchFailingRunner { calls: 0 };
 
-        let error =
-            download_with_runner("https://youtube.com/watch?v=video", &mut runner).unwrap_err();
+        let error = download_with_runner("https://youtube.com/watch?v=video", false, &mut runner)
+            .unwrap_err();
 
         assert_eq!(runner.calls, 1);
         assert!(error.to_string().contains("Failed to run yt-dlp"));
@@ -419,7 +539,8 @@ mod tests {
     fn fallback_attempts_use_isolated_output_directories() {
         let mut runner = FakeRunner::with_statuses([1, 0]);
 
-        let video = download_with_runner("https://youtube.com/watch?v=video", &mut runner).unwrap();
+        let video =
+            download_with_runner("https://youtube.com/watch?v=video", false, &mut runner).unwrap();
 
         assert_ne!(runner.output_paths[0], runner.output_paths[1]);
         assert_eq!(video.path.parent(), Some(runner.output_paths[1].as_path()));
@@ -429,17 +550,45 @@ mod tests {
     fn non_youtube_download_uses_the_existing_selector_once() {
         let mut runner = FakeRunner::with_statuses([1, 0]);
 
-        let error = download_with_runner("https://v.redd.it/video", &mut runner).unwrap_err();
+        let error =
+            download_with_runner("https://v.redd.it/video", false, &mut runner).unwrap_err();
 
         assert_eq!(runner.selectors, ["bv[height<=1080]+ba/best"]);
         assert!(error.to_string().contains("requested format failed"));
     }
 
     #[test]
+    fn confirmed_twitter_no_video_stops_without_a_format_retry() {
+        let mut runner = StaticFailingRunner {
+            calls: 0,
+            stdout: b"ERROR: [twitter] 123: No video could be found in this tweet".to_vec(),
+        };
+
+        let error = download_with_runner("https://x.com/example/status/123", true, &mut runner)
+            .expect_err("a status without video should not produce a download");
+
+        assert!(is_confirmed_no_video(&error));
+        assert_eq!(runner.calls, 1);
+    }
+
+    #[test]
+    fn other_ytdlp_failures_are_not_classified_as_no_video() {
+        let mut runner = StaticFailingRunner {
+            calls: 0,
+            stdout: b"ERROR: [twitter] 123: The requested format is not available".to_vec(),
+        };
+
+        let error = download_with_runner("https://x.com/example/status/123", true, &mut runner)
+            .expect_err("a format failure should not produce a download");
+
+        assert!(!is_confirmed_no_video(&error));
+    }
+
+    #[test]
     fn youtube_download_reports_the_final_failure_after_exhausting_the_ladder() {
         let mut runner = FakeRunner::with_statuses([1, 2, 3, 4]);
 
-        let error = download_with_runner("https://youtu.be/video", &mut runner).unwrap_err();
+        let error = download_with_runner("https://youtu.be/video", false, &mut runner).unwrap_err();
 
         assert_eq!(runner.selectors, YOUTUBE_FORMATS);
         assert!(error.to_string().contains("exit status: 4"));
@@ -454,11 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ytdlp_args_use_the_supported_firefox_impersonation_target() {
+    fn test_ytdlp_args_use_the_supported_firefox_target_and_first_playlist_item() {
         let args = make_ytdlp_args(
             Path::new("/tmp/output"),
             "https://example.com/video",
             GENERIC_FORMATS[0],
+            true,
         );
         let args = args
             .iter()
@@ -467,7 +617,30 @@ mod tests {
 
         assert_eq!(&args[..2], ["--impersonate", "Firefox-135"]);
         assert!(args.contains(&"--write-info-json".into()));
+        let playlist_items = args
+            .iter()
+            .position(|arg| arg == "--playlist-items")
+            .expect("yt-dlp arguments should limit a direct submission to its first item");
+        assert_eq!(args[playlist_items + 1], "1");
+        assert!(!args.contains(&"--no-playlist".into()));
         assert_eq!(args.last().unwrap(), "https://example.com/video");
+    }
+
+    #[test]
+    fn non_direct_media_keeps_the_existing_single_item_selection() {
+        let args = make_ytdlp_args(
+            Path::new("/tmp/output"),
+            "https://example.com/video",
+            GENERIC_FORMATS[0],
+            false,
+        );
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--no-playlist".into()));
+        assert!(!args.contains(&"--playlist-items".into()));
     }
 
     fn write_empty_file(path: &Path) {
@@ -547,82 +720,89 @@ mod tests {
     }
 
     #[test]
-    fn description_from_info_json_preserves_multiline_unicode_text() {
-        let dir = TempDir::new().expect("create tempdir");
-        let video = dir.path().join("tweet_[123]_1280x720.mp4");
-        write_empty_file(&video);
+    fn metadata_uses_the_source_status_body_for_x_captions() {
+        let temp_dir = TempDir::new().expect("create tempdir");
+        let attempt_path = temp_dir.path().join("attempt");
+        fs::create_dir(&attempt_path).expect("create attempt directory");
+        write_empty_file(&attempt_path.join("first_[first-media]_1280x720.mp4"));
         fs::write(
-            dir.path().join("tweet_[123]_1280x720.info.json"),
-            r#"{"description":"Line one\nПривіт https://t.co/example"}"#,
+            attempt_path.join("source.info.json"),
+            r#"{"id":"source-status","description":"Source status body"}"#,
+        )
+        .expect("write info json");
+        fs::write(
+            attempt_path.join("first-media.info.json"),
+            r#"{"id":"first-media","description":"Selected media description"}"#,
         )
         .expect("write info json");
 
+        let video = video_from_download(
+            "https://x.com/example/status/source-status",
+            true,
+            temp_dir,
+            attempt_path,
+        )
+        .expect("source and selected metadata should enrich the downloaded video");
+
         assert_eq!(
-            description_from_info_json(dir.path(), &video).unwrap(),
-            Some("Line one\nПривіт https://t.co/example".into())
+            video.description.as_deref(),
+            Some("Selected media description")
+        );
+        assert_eq!(
+            video.source_description.as_deref(),
+            Some("Source status body")
         );
     }
 
     #[test]
-    fn description_from_info_json_allows_missing_description() {
-        let dir = TempDir::new().expect("create tempdir");
-        let video = dir.path().join("tweet_[123]_1280x720.mp4");
-        write_empty_file(&video);
-        fs::write(
-            dir.path().join("tweet_[123]_1280x720.info.json"),
-            r#"{"title":"fallback title"}"#,
-        )
-        .expect("write info json");
+    fn metadata_failures_do_not_block_a_downloaded_media_item() {
+        for (url, fixture) in [
+            ("https://x.com/example/status/source-status", None),
+            ("https://youtu.be/video", None),
+            (
+                "https://x.com/example/status/source-status",
+                Some(("malformed.info.json", "not JSON")),
+            ),
+            (
+                "https://x.com/example/status/source-status",
+                Some((
+                    "other.info.json",
+                    r#"{"id":"other","description":"wrong item"}"#,
+                )),
+            ),
+        ] {
+            let temp_dir = TempDir::new().expect("create tempdir");
+            let attempt_path = temp_dir.path().join("attempt");
+            fs::create_dir(&attempt_path).expect("create attempt directory");
+            write_empty_file(&attempt_path.join("first_[media-id]_1280x720.mp4"));
+            if let Some((name, contents)) = fixture {
+                fs::write(attempt_path.join(name), contents).expect("write metadata fixture");
+            }
 
+            let video = video_from_download(url, true, temp_dir, attempt_path)
+                .expect("metadata failures should not discard downloaded media");
+
+            assert_eq!(video.title, "first");
+            assert_eq!(video.description, None);
+            assert_eq!(video.source_description, None);
+        }
+    }
+
+    #[test]
+    fn x_status_id_only_accepts_x_status_urls() {
         assert_eq!(
-            description_from_info_json(dir.path(), &video).unwrap(),
+            x_status_id("https://x.com/example/status/123"),
+            Some("123".to_owned())
+        );
+        assert_eq!(
+            x_status_id("https://twitter.com/example/status/123?ref=share"),
+            Some("123".to_owned())
+        );
+        assert_eq!(
+            x_status_id("https://x.com/example/status/123/photo/1"),
             None
         );
-    }
-
-    #[test]
-    fn description_from_info_json_reports_missing_or_invalid_sidecars() {
-        let dir = TempDir::new().expect("create tempdir");
-        let video = dir.path().join("tweet_[123]_1280x720.mp4");
-        write_empty_file(&video);
-
-        let missing = description_from_info_json(dir.path(), &video).unwrap_err();
-        assert!(
-            missing
-                .to_string()
-                .contains("exactly one yt-dlp .info.json")
-        );
-
-        fs::write(
-            dir.path().join("tweet_[123]_1280x720.info.json"),
-            "not JSON",
-        )
-        .expect("write invalid info json");
-        let invalid = description_from_info_json(dir.path(), &video).unwrap_err();
-        assert!(
-            invalid
-                .to_string()
-                .contains("Could not parse yt-dlp metadata sidecar")
-        );
-    }
-
-    #[test]
-    fn description_from_info_json_rejects_sidecar_for_another_video() {
-        let dir = TempDir::new().expect("create tempdir");
-        let video = dir.path().join("tweet_[123]_1280x720.mp4");
-        write_empty_file(&video);
-        fs::write(
-            dir.path().join("other_[456]_1280x720.info.json"),
-            r#"{"description":"wrong tweet"}"#,
-        )
-        .expect("write mismatched info json");
-
-        let error = description_from_info_json(dir.path(), &video).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not match downloaded video")
-        );
+        assert_eq!(x_status_id("https://example.com/video"), None);
     }
 
     #[test]

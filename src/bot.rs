@@ -7,6 +7,7 @@ use crate::{
         PublishVariant, RepostAction, ReviewContentKind, ReviewPost, RichText, SubscriptionArgs,
         decode_repost_callback,
     },
+    ytdlp,
 };
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -32,6 +33,7 @@ const TELEGRAM_BOT_API_URL_ENV: &str = "TELEGRAM_BOT_API_URL";
 type CaptionEditStore = Arc<Mutex<HashMap<i64, CaptionEditState>>>;
 
 const GENERIC_USER_ERROR: &str = "The requested operation could not be completed.";
+const NO_DOWNLOADABLE_X_VIDEO: &str = "This X status has no downloadable video.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -55,6 +57,15 @@ fn user_message(message: impl Into<String>) -> anyhow::Error {
         source: None,
     }
     .into()
+}
+
+fn direct_media_user_error(is_twitter_status: bool, error: anyhow::Error) -> anyhow::Error {
+    let message = if is_twitter_status && ytdlp::is_confirmed_no_video(&error) {
+        NO_DOWNLOADABLE_X_VIDEO
+    } else {
+        "The video link could not be processed."
+    };
+    user_error(message, error)
 }
 
 fn user_facing_message_or<'a>(err: &'a anyhow::Error, fallback: &'a str) -> &'a str {
@@ -419,13 +430,13 @@ async fn handle_no_command(
         if let Some(link) = parse_twitter_status_url(text) {
             handle_video_link(&db, tg, message.chat.id.0, &link, true)
                 .await
-                .map_err(|err| user_error("The video link could not be processed.", err))?;
+                .map_err(|err| direct_media_user_error(true, err))?;
         } else if is_youtube_url(text) {
             let link =
                 Url::parse(text).map_err(|err| user_error("The video link is invalid.", err))?;
             handle_video_link(&db, tg, message.chat.id.0, &link, false)
                 .await
-                .map_err(|err| user_error("The video link could not be processed.", err))?;
+                .map_err(|err| direct_media_user_error(false, err))?;
         } else {
             let Some(id) = RE_REDDIT
                 .captures(text)
@@ -1408,6 +1419,27 @@ mod tests {
         assert_eq!(
             user_facing_message_or(&unclassified, GENERIC_USER_ERROR),
             GENERIC_USER_ERROR
+        );
+    }
+
+    #[test]
+    fn confirmed_x_no_video_uses_the_unavailable_submission_message() {
+        let confirmed = direct_media_user_error(true, ytdlp::NoDownloadableVideo.into());
+        assert_eq!(
+            user_facing_message_or(&confirmed, GENERIC_USER_ERROR),
+            NO_DOWNLOADABLE_X_VIDEO
+        );
+
+        let non_x = direct_media_user_error(false, ytdlp::NoDownloadableVideo.into());
+        assert_eq!(
+            user_facing_message_or(&non_x, GENERIC_USER_ERROR),
+            "The video link could not be processed."
+        );
+
+        let transient = direct_media_user_error(true, anyhow::anyhow!("network timeout"));
+        assert_eq!(
+            user_facing_message_or(&transient, GENERIC_USER_ERROR),
+            "The video link could not be processed."
         );
     }
 

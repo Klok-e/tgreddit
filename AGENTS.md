@@ -53,7 +53,7 @@ Update `README.md` and `config.example.toml` when commands, configuration keys, 
 
 ### Issue tracker
 
-Issues and PRDs are tracked as local markdown under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+Issues and specs are tracked as local markdown under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

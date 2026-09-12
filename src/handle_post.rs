@@ -56,7 +56,7 @@ pub async fn handle_video_link(
     link: &Url,
     is_twitter_status: bool,
 ) -> Result<()> {
-    let video = tokio::task::block_in_place(|| ytdlp::download(link.as_str()))
+    let video = tokio::task::block_in_place(|| ytdlp::download_direct(link.as_str()))
         .context("Failed to download video from link")?;
 
     db.record_post_seen_with_current_time(chat_id, &video)?;
@@ -67,7 +67,7 @@ pub async fn handle_video_link(
         text: direct_video_caption(
             is_twitter_status,
             &video.title,
-            video.description.as_deref(),
+            video.source_description.as_deref(),
             &metadata,
         ),
         entities: Vec::new(),
@@ -107,13 +107,14 @@ pub async fn handle_video_link(
 fn direct_video_caption(
     is_twitter_status: bool,
     title: &str,
-    description: Option<&str>,
+    source_description: Option<&str>,
     metadata: &RichText,
 ) -> String {
     if is_twitter_status
-        && let Some(description) = description.filter(|description| !description.trim().is_empty())
+        && let Some(source_description) =
+            source_description.filter(|description| !description.trim().is_empty())
     {
-        return truncate_caption_for_metadata(&clean_x_tweet_body(description), metadata);
+        return truncate_caption_for_metadata(&clean_x_tweet_body(source_description), metadata);
     }
     title.to_owned()
 }
