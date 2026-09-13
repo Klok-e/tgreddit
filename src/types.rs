@@ -14,6 +14,33 @@ pub enum MediaKind {
     Video,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptionPlacement {
+    #[default]
+    BelowMedia,
+    AboveMedia,
+}
+
+impl CaptionPlacement {
+    pub const fn is_above_media(self) -> bool {
+        matches!(self, Self::AboveMedia)
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::BelowMedia => Self::AboveMedia,
+            Self::AboveMedia => Self::BelowMedia,
+        }
+    }
+
+    pub const fn toggle_symbol(self) -> &'static str {
+        match self {
+            Self::BelowMedia => "⬆️",
+            Self::AboveMedia => "⬇️",
+        }
+    }
+}
+
 impl MediaKind {
     pub(crate) const fn as_db_value(self) -> &'static str {
         match self {
@@ -87,6 +114,8 @@ pub enum RepostAction {
     PostWithoutCaption,
     #[serde(rename = "l")]
     PostWithLink,
+    #[serde(rename = "t")]
+    ToggleCaptionPlacement,
     #[serde(rename = "f")]
     ConfirmPublish,
     #[serde(rename = "c")]
@@ -127,6 +156,7 @@ pub struct ReviewPost {
     pub source_url: String,
     pub caption: RichText,
     pub content_kind: ReviewContentKind,
+    pub caption_placement: CaptionPlacement,
     pub review_message_id: MessageId,
     pub control_message_id: MessageId,
     pub metadata: RichText,
@@ -197,6 +227,7 @@ mod tests {
             RepostAction::Post,
             RepostAction::PostWithoutCaption,
             RepostAction::PostWithLink,
+            RepostAction::ToggleCaptionPlacement,
             RepostAction::ConfirmPublish,
             RepostAction::CancelPublish,
         ];
@@ -232,5 +263,19 @@ mod tests {
             assert_eq!(encoded, expected);
             assert_eq!(decode_repost_callback(&encoded).unwrap().action, action);
         }
+    }
+
+    #[test]
+    fn caption_placement_toggles_and_describes_its_next_action() {
+        assert_eq!(
+            CaptionPlacement::BelowMedia.toggled(),
+            CaptionPlacement::AboveMedia
+        );
+        assert_eq!(CaptionPlacement::BelowMedia.toggle_symbol(), "⬆️");
+        assert_eq!(
+            CaptionPlacement::AboveMedia.toggled(),
+            CaptionPlacement::BelowMedia
+        );
+        assert_eq!(CaptionPlacement::AboveMedia.toggle_symbol(), "⬇️");
     }
 }

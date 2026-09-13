@@ -191,6 +191,10 @@ const MIGRATIONS: &[&str] = &[
     alter table telegram_file
     add column media_kind text not null default 'photo' check (media_kind in ('photo', 'video'));
     ",
+    "
+    alter table review_post
+    add column caption_above_media integer not null default 0 check (caption_above_media in (0, 1));
+    ",
 ];
 
 #[derive(Debug)]
@@ -590,6 +594,7 @@ impl Database {
                 caption_text,
                 caption_entities_json,
                 content_kind_json,
+                caption_above_media,
                 review_message_id,
                 control_message_id,
                 metadata_text,
@@ -604,6 +609,7 @@ impl Database {
                 :caption_text,
                 :caption_entities_json,
                 :content_kind_json,
+                :caption_above_media,
                 :review_message_id,
                 :control_message_id,
                 :metadata_text,
@@ -617,6 +623,7 @@ impl Database {
                 caption_text = excluded.caption_text,
                 caption_entities_json = excluded.caption_entities_json,
                 content_kind_json = excluded.content_kind_json,
+                caption_above_media = excluded.caption_above_media,
                 review_message_id = excluded.review_message_id,
                 control_message_id = excluded.control_message_id,
                 metadata_text = excluded.metadata_text,
@@ -633,6 +640,7 @@ impl Database {
                 ":caption_text": review.caption.text,
                 ":caption_entities_json": caption_entities_json,
                 ":content_kind_json": content_kind_json,
+                ":caption_above_media": review.caption_placement.is_above_media(),
                 ":review_message_id": review.review_message_id.0,
                 ":control_message_id": review.control_message_id.0,
                 ":metadata_text": review.metadata.text,
@@ -670,6 +678,56 @@ impl Database {
         )
     }
 
+    pub fn active_media_review_posts(&self) -> Result<Vec<ReviewPost>> {
+        let conn = self.conn.lock().expect("No poison");
+        let mut statement = conn
+            .prepare(
+                "
+                select chat_id,
+                       post_id,
+                       source_url,
+                       caption_text,
+                       caption_entities_json,
+                       content_kind_json,
+                       caption_above_media,
+                       review_message_id,
+                       control_message_id,
+                       metadata_text,
+                       metadata_entities_json,
+                       pending_publish_variant_json,
+                       previous_keyboard_json,
+                       published_at
+                from review_post
+                where content_kind_json in ('\"m\"', '\"g\"')
+                  and pending_publish_variant_json is null
+                  and publishing = 0
+                  and published_at is null
+                ",
+            )
+            .context("could not query active media review posts")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(StoredReviewPost {
+                    chat_id: row.get("chat_id")?,
+                    post_id: row.get("post_id")?,
+                    source_url: row.get("source_url")?,
+                    caption_text: row.get("caption_text")?,
+                    caption_entities_json: row.get("caption_entities_json")?,
+                    content_kind_json: row.get("content_kind_json")?,
+                    caption_above_media: row.get("caption_above_media")?,
+                    review_message_id: row.get("review_message_id")?,
+                    control_message_id: row.get("control_message_id")?,
+                    metadata_text: row.get("metadata_text")?,
+                    metadata_entities_json: row.get("metadata_entities_json")?,
+                    pending_publish_variant_json: row.get("pending_publish_variant_json")?,
+                    previous_keyboard_json: row.get("previous_keyboard_json")?,
+                    published_at: row.get("published_at")?,
+                })
+            })
+            .context("could not retrieve active media review posts")?;
+        rows.map(|stored| ReviewPost::try_from(stored?)).collect()
+    }
+
     pub fn update_review_caption(
         &self,
         chat_id: i64,
@@ -696,6 +754,38 @@ impl Database {
             )
             .context("could not update review caption")?;
         anyhow::ensure!(changed == 1, "review post does not exist");
+        Ok(())
+    }
+
+    pub fn update_caption_placement(
+        &self,
+        chat_id: i64,
+        post_id: &str,
+        placement: CaptionPlacement,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("No poison");
+        let changed = conn
+            .execute(
+                "
+                update review_post
+                set caption_above_media = :caption_above_media
+                where chat_id = :chat_id
+                  and post_id = :post_id
+                  and pending_publish_variant_json is null
+                  and publishing = 0
+                  and published_at is null
+                ",
+                named_params! {
+                    ":caption_above_media": placement.is_above_media(),
+                    ":chat_id": chat_id,
+                    ":post_id": post_id,
+                },
+            )
+            .context("could not update caption placement")?;
+        anyhow::ensure!(
+            changed == 1,
+            "unpublished review post is not ready for caption placement"
+        );
         Ok(())
     }
 
@@ -819,6 +909,7 @@ impl Database {
                    caption_text,
                    caption_entities_json,
                    content_kind_json,
+                   caption_above_media,
                    review_message_id,
                    control_message_id,
                    metadata_text,
@@ -839,6 +930,7 @@ impl Database {
                     caption_text: row.get("caption_text")?,
                     caption_entities_json: row.get("caption_entities_json")?,
                     content_kind_json: row.get("content_kind_json")?,
+                    caption_above_media: row.get("caption_above_media")?,
                     review_message_id: row.get("review_message_id")?,
                     control_message_id: row.get("control_message_id")?,
                     metadata_text: row.get("metadata_text")?,
@@ -861,6 +953,7 @@ struct StoredReviewPost {
     caption_text: String,
     caption_entities_json: String,
     content_kind_json: String,
+    caption_above_media: bool,
     review_message_id: i32,
     control_message_id: i32,
     metadata_text: String,
@@ -885,6 +978,11 @@ impl TryFrom<StoredReviewPost> for ReviewPost {
             },
             content_kind: serde_json::from_str(&stored.content_kind_json)
                 .context("could not deserialize review content kind")?,
+            caption_placement: if stored.caption_above_media {
+                CaptionPlacement::AboveMedia
+            } else {
+                CaptionPlacement::BelowMedia
+            },
             review_message_id: MessageId(stored.review_message_id),
             control_message_id: MessageId(stored.control_message_id),
             metadata: RichText {
@@ -990,6 +1088,7 @@ mod tests {
                 entities: vec![MessageEntity::bold(0, 7)],
             },
             content_kind: ReviewContentKind::Media,
+            caption_placement: CaptionPlacement::BelowMedia,
             review_message_id: MessageId(10),
             control_message_id: MessageId(10),
             metadata: RichText {
@@ -1267,5 +1366,53 @@ mod tests {
         assert_eq!(updated.caption, replacement);
         assert_eq!(updated.source_url, review.source_url);
         assert_eq!(updated.metadata, review.metadata);
+    }
+
+    #[test]
+    fn caption_placement_defaults_below_and_persists_per_review_post() {
+        let db = migrated_db_with_post();
+        let review = test_review_post();
+        db.upsert_review_post(&review).unwrap();
+
+        assert_eq!(
+            db.get_review_post(review.chat_id, &review.post_id)
+                .unwrap()
+                .unwrap()
+                .caption_placement,
+            CaptionPlacement::BelowMedia
+        );
+
+        db.update_caption_placement(
+            review.chat_id,
+            &review.post_id,
+            CaptionPlacement::AboveMedia,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_review_post(review.chat_id, &review.post_id)
+                .unwrap()
+                .unwrap()
+                .caption_placement,
+            CaptionPlacement::AboveMedia
+        );
+        assert_eq!(db.active_media_review_posts().unwrap().len(), 1);
+
+        db.begin_review_publish(
+            review.chat_id,
+            &review.post_id,
+            PublishVariant::Caption,
+            None,
+        )
+        .unwrap();
+        assert!(db.active_media_review_posts().unwrap().is_empty());
+        assert!(
+            db.update_caption_placement(
+                review.chat_id,
+                &review.post_id,
+                CaptionPlacement::BelowMedia,
+            )
+            .is_err()
+        );
     }
 }

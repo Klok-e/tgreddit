@@ -91,11 +91,11 @@ return new posts.
 
 ### Reviewing and reposting
 
-Every private Reddit review message shows one visible, clickable link to the Reddit post. Directly submitted media shows its submitted URL. Media and galleries include **Post**, **Post (no caption)**, and **Post (with link)** buttons. Link and self-text posts include **Post** and **Post (with link)**.
+Every private Reddit review message shows one visible, clickable link to the Reddit post. Directly submitted media shows its submitted URL. Media and galleries include **Post**, **Post (no caption)**, and **Post (with link)** buttons plus a second-row arrow: **⬆️** moves the caption above media and becomes **⬇️**, which moves it back below. Link and self-text posts include **Post** and **Post (with link)**.
 
 For an X/Twitter Tweet, TGReddit fetches text and attached media through the configured FxTwitter-compatible API. It posts every source Tweet photo and video in order, while a directly quoted Tweet contributes labeled text only. The Repost Caption keeps line breaks and non-`t.co` links but removes all `t.co` URLs. If it cannot fit Telegram's media-caption limit with the visible source link, TGReddit shortens it at a Unicode boundary and adds an ellipsis. A Tweet without source media produces a text Review Post.
 
-**Post** selects the current Repost Caption. **Post (no caption)** selects media without a caption. **Post (with link)** appends a blank line and the exact Source URL; this is the submitted download URL for directly downloaded media and the Reddit submission permalink for galleries and self-text posts.
+**Post** selects the current Repost Caption. **Post (no caption)** selects media without a caption. **Post (with link)** appends a blank line and the exact Source URL; this is the submitted download URL for directly downloaded media and the Reddit submission permalink for galleries and self-text posts. Caption placement is stored per media Review Post, persists across restart, and moves the whole `Post (with link)` caption with its Source URL.
 
 Choosing a variant replaces the review keyboard with a variant-specific **Confirm** button and **Cancel**. Captioned variants also open a ForceReply editor. Telegram cannot prefill a reply, so the prompt shows the current caption for reference. A reply replaces the Repost Caption on the original review message, preserves Telegram-native formatting such as bold, italic, spoilers, code, quotes, and embedded links, and removes both the prompt and reply after a successful edit.
 

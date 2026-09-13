@@ -16,6 +16,10 @@ The Telegram channel where the operator publishes selected posts.
 The standalone rich text attached to a post in the Repost Channel. It does not include private review metadata unless the operator explicitly supplies that text.
 _Avoid_: Title, description
 
+**Caption Placement**:
+The operator's per-Review-Post choice to show a Repost Caption above or below the media in the Repost Channel. The media Review Post previews its selected position and changes it from its control; a Source URL included by the `Post (with link)` Publish Variant moves with the caption.
+_Avoid_: Caption position, media layout
+
 **X Tweet Body**:
 The text TGReddit derives from an X Tweet for its default Repost Caption, excluding all `t.co` URLs while retaining other URLs. When that Tweet directly quotes another Tweet, the quoted Tweet's cleaned text follows the source text under a `Quoted @author:` label. It remains the caption source when the Tweet has media.
 _Avoid_: Tweet description, X metadata
@@ -42,4 +46,4 @@ The one visible URL appended by the `Post (with link)` Publish Variant. For down
 The selected Repost Channel output: the current Repost Caption, media without a caption, or the current Repost Caption followed by the Source URL.
 
 **Selected-output review**:
-The confirmation state entered after choosing a Publish Variant. The Review Post keeps the proposed content visible and offers variant-specific confirmation and cancellation before publishing.
+The confirmation state entered after choosing a Publish Variant. The Review Post keeps that fixed proposed output visible and offers variant-specific confirmation or cancellation before publishing.

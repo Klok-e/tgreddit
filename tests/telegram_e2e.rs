@@ -14,7 +14,13 @@ use teloxide::{
     Bot,
     types::{ChatId, MessageEntity},
 };
-use tgreddit::{bot, config::Config, db::Database, handle_post, messages, reddit, types::RichText};
+use tgreddit::{
+    bot,
+    config::Config,
+    db::Database,
+    handle_post, messages, reddit,
+    types::{CaptionPlacement, RichText},
+};
 
 const APP_CONFIG_PATH: &str = "tgreddit.toml";
 const E2E_CONFIG_PATH: &str = "telegram-e2e.toml";
@@ -162,25 +168,31 @@ async fn run_case(test_case: TestCase) -> Result<()> {
     };
     let caption_variants = if media_post {
         vec![
-            Some(review.caption.clone()),
-            None,
-            Some(rich_caption),
-            Some(messages::append_source_url(
-                &review.caption,
-                &review.source_url,
-            )),
+            (Some(review.caption.clone()), CaptionPlacement::BelowMedia),
+            (None, CaptionPlacement::BelowMedia),
+            (Some(rich_caption), CaptionPlacement::AboveMedia),
+            (
+                Some(messages::append_source_url(
+                    &review.caption,
+                    &review.source_url,
+                )),
+                CaptionPlacement::AboveMedia,
+            ),
         ]
     } else {
         vec![
-            Some(review.caption.clone()),
-            Some(rich_caption),
-            Some(messages::append_source_url(
-                &review.caption,
-                &review.source_url,
-            )),
+            (Some(review.caption.clone()), CaptionPlacement::BelowMedia),
+            (Some(rich_caption), CaptionPlacement::BelowMedia),
+            (
+                Some(messages::append_source_url(
+                    &review.caption,
+                    &review.source_url,
+                )),
+                CaptionPlacement::BelowMedia,
+            ),
         ]
     };
-    for caption in caption_variants {
+    for (caption, caption_placement) in caption_variants {
         let db = Database::open(&app_config)?;
         bot::handle_repost_with_rich_caption(
             db,
@@ -189,6 +201,7 @@ async fn run_case(test_case: TestCase) -> Result<()> {
             &post,
             &delivered,
             caption.clone(),
+            caption_placement,
         )
         .await
         .with_context(|| format!("repost with rich caption {caption:?} failed"))?;

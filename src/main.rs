@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
     let shutdown = Arc::new(AtomicBool::new(false));
     let bot = bot::MyBot::new(config.clone()).await?;
+    bot::restore_active_media_review_controls(&config, &bot.tg).await?;
 
     // Any arguments are for things that help with debugging and development
     // Not optimized for usability.

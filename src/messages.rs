@@ -2,8 +2,8 @@ use crate::{
     db::Recordable,
     reddit::{self},
     types::{
-        PublishVariant, RepostAction, RepostCallbackData, ReviewContentKind, RichText,
-        Subscription, Video,
+        CaptionPlacement, PublishVariant, RepostAction, RepostCallbackData, ReviewContentKind,
+        RichText, Subscription, Video,
     },
 };
 use itertools::Itertools;
@@ -183,24 +183,33 @@ pub fn format_media_repost_buttons<T: Recordable>(
     post: &T,
     is_gallery: bool,
 ) -> InlineKeyboardMarkup {
-    format_media_repost_buttons_for_id(post.id(), is_gallery)
+    format_media_repost_buttons_for_id(post.id(), is_gallery, CaptionPlacement::BelowMedia)
 }
 
-pub fn format_media_repost_buttons_for_id(post_id: &str, is_gallery: bool) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::default().append_row([
-        InlineKeyboardButton::callback(
-            "Post",
-            callback_data_for_id(post_id, RepostAction::Post, is_gallery),
-        ),
-        InlineKeyboardButton::callback(
-            "Post (no caption)",
-            callback_data_for_id(post_id, RepostAction::PostWithoutCaption, is_gallery),
-        ),
-        InlineKeyboardButton::callback(
-            "Post (with link)",
-            callback_data_for_id(post_id, RepostAction::PostWithLink, is_gallery),
-        ),
-    ])
+pub fn format_media_repost_buttons_for_id(
+    post_id: &str,
+    is_gallery: bool,
+    caption_placement: CaptionPlacement,
+) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::default()
+        .append_row([
+            InlineKeyboardButton::callback(
+                "Post",
+                callback_data_for_id(post_id, RepostAction::Post, is_gallery),
+            ),
+            InlineKeyboardButton::callback(
+                "Post (no caption)",
+                callback_data_for_id(post_id, RepostAction::PostWithoutCaption, is_gallery),
+            ),
+            InlineKeyboardButton::callback(
+                "Post (with link)",
+                callback_data_for_id(post_id, RepostAction::PostWithLink, is_gallery),
+            ),
+        ])
+        .append_row([InlineKeyboardButton::callback(
+            caption_placement.toggle_symbol(),
+            callback_data_for_id(post_id, RepostAction::ToggleCaptionPlacement, is_gallery),
+        )])
 }
 
 pub fn format_text_repost_buttons<T: Recordable>(post: &T) -> InlineKeyboardMarkup {
@@ -330,6 +339,24 @@ mod tests {
                 RepostAction::PostWithoutCaption,
                 RepostAction::PostWithLink,
             ]
+        );
+        let placement = &keyboard.inline_keyboard[1];
+        assert_eq!(placement[0].text, "⬆️");
+        assert_eq!(
+            button_action(&placement[0]),
+            RepostAction::ToggleCaptionPlacement
+        );
+    }
+
+    #[test]
+    fn media_repost_buttons_describe_the_next_caption_placement() {
+        let keyboard =
+            format_media_repost_buttons_for_id("abc123", false, CaptionPlacement::AboveMedia);
+
+        assert_eq!(keyboard.inline_keyboard[1][0].text, "⬇️");
+        assert_eq!(
+            button_action(&keyboard.inline_keyboard[1][0]),
+            RepostAction::ToggleCaptionPlacement
         );
     }
 

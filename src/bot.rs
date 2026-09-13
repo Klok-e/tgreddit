@@ -6,8 +6,8 @@ use crate::{
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
     types::{
-        MediaKind, PublishVariant, RepostAction, ReviewContentKind, ReviewPost, RichText,
-        SubscriptionArgs, TelegramMediaFile, decode_repost_callback,
+        CaptionPlacement, MediaKind, PublishVariant, RepostAction, ReviewContentKind, ReviewPost,
+        RichText, SubscriptionArgs, TelegramMediaFile, decode_repost_callback,
     },
     x_tweet,
 };
@@ -223,7 +223,8 @@ async fn edit_review_content(tg: &Bot, review: &ReviewPost) -> Result<()> {
         let request = tg
             .edit_message_caption(chat_id, review.review_message_id)
             .caption(content.text)
-            .caption_entities(content.entities);
+            .caption_entities(content.entities)
+            .show_caption_above_media(review.caption_placement.is_above_media());
         if review.review_message_id == review.control_message_id {
             request
                 .reply_markup(confirmation.unwrap_or_default())
@@ -236,22 +237,102 @@ async fn edit_review_content(tg: &Bot, review: &ReviewPost) -> Result<()> {
 }
 
 async fn restore_review_keyboard(tg: &Bot, review: &ReviewPost) -> Result<()> {
-    let keyboard = review
-        .previous_keyboard
-        .clone()
-        .unwrap_or_else(|| match review.content_kind {
-            ReviewContentKind::Media | ReviewContentKind::Gallery => {
-                messages::format_media_repost_buttons_for_id(
-                    &review.post_id,
-                    review.content_kind == ReviewContentKind::Gallery,
-                )
-            }
-            ReviewContentKind::Text => messages::format_text_repost_buttons_for_id(&review.post_id),
-        });
+    let keyboard = match review.content_kind {
+        ReviewContentKind::Media | ReviewContentKind::Gallery => {
+            messages::format_media_repost_buttons_for_id(
+                &review.post_id,
+                review.content_kind == ReviewContentKind::Gallery,
+                review.caption_placement,
+            )
+        }
+        ReviewContentKind::Text => review
+            .previous_keyboard
+            .clone()
+            .unwrap_or_else(|| messages::format_text_repost_buttons_for_id(&review.post_id)),
+    };
     tg.edit_message_reply_markup(ChatId(review.chat_id), review.control_message_id)
         .reply_markup(keyboard)
         .await?;
     Ok(())
+}
+
+pub async fn restore_active_media_review_controls(config: &config::Config, tg: &Bot) -> Result<()> {
+    let db = db::Database::open(config)?;
+    for review in db.active_media_review_posts()? {
+        if let Err(err) = restore_review_keyboard(tg, &review).await {
+            warn!(
+                "could not restore caption placement control for review post {}: {err:#}",
+                review.post_id
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn edit_caption_placement_preview(tg: &Bot, review: &ReviewPost) -> Result<()> {
+    let content = messages::compose_review_text(&review.caption, &review.metadata);
+    let keyboard = messages::format_media_repost_buttons_for_id(
+        &review.post_id,
+        review.content_kind == ReviewContentKind::Gallery,
+        review.caption_placement,
+    );
+    let chat_id = ChatId(review.chat_id);
+    let request = tg
+        .edit_message_caption(chat_id, review.review_message_id)
+        .caption(content.text)
+        .caption_entities(content.entities)
+        .show_caption_above_media(review.caption_placement.is_above_media());
+    if review.review_message_id == review.control_message_id {
+        request.reply_markup(keyboard).await?;
+    } else {
+        request.await?;
+        tg.edit_message_reply_markup(chat_id, review.control_message_id)
+            .reply_markup(keyboard)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn toggle_caption_placement(
+    db: &db::Database,
+    tg: &Bot,
+    message: &Message,
+    post_id: &str,
+    is_gallery: bool,
+) -> Result<bool> {
+    let chat_id = message.chat.id;
+    let review = match db.get_review_post(chat_id.0, post_id)? {
+        Some(review) => review,
+        None if is_gallery => return Ok(false),
+        None => bootstrap_review_post(db, message, post_id)?,
+    };
+    anyhow::ensure!(
+        matches!(
+            review.content_kind,
+            ReviewContentKind::Media | ReviewContentKind::Gallery
+        ),
+        "caption placement applies only to media reviews"
+    );
+    anyhow::ensure!(
+        review.pending_publish_variant.is_none(),
+        "review confirmation is already active"
+    );
+
+    let mut toggled = review.clone();
+    toggled.caption_placement = toggled.caption_placement.toggled();
+    db.update_caption_placement(chat_id.0, post_id, toggled.caption_placement)?;
+    if let Err(err) = edit_caption_placement_preview(tg, &toggled).await {
+        if let Err(restore_err) = edit_caption_placement_preview(tg, &review).await {
+            error!("failed to restore caption placement preview after error: {restore_err:#}");
+        }
+        if let Err(rollback_err) =
+            db.update_caption_placement(chat_id.0, post_id, review.caption_placement)
+        {
+            error!("failed to roll back caption placement after preview error: {rollback_err:#}");
+        }
+        return Err(err);
+    }
+    Ok(true)
 }
 
 fn take_caption_edit(
@@ -617,12 +698,14 @@ async fn handle_repost_media(
     tg: &Bot,
     message_id: MessageId,
     caption: Option<&RichText>,
+    caption_placement: CaptionPlacement,
 ) -> Result<()> {
     let repost_channel_id = repost_channel_id(&db, chat_id)?;
     let caption = caption.cloned().unwrap_or_default();
     tg.copy_message(repost_channel_id, chat_id, message_id)
         .caption(caption.text)
         .caption_entities(caption.entities)
+        .show_caption_above_media(caption_placement.is_above_media())
         .send()
         .await?;
     Ok(())
@@ -634,6 +717,7 @@ async fn handle_repost_gallery(
     tg: &Bot,
     gallery_files: Vec<TelegramMediaFile>,
     post_caption: Option<&RichText>,
+    caption_placement: CaptionPlacement,
 ) -> Result<()> {
     let mut media_group = vec![];
     let mut first = true;
@@ -642,6 +726,7 @@ async fn handle_repost_gallery(
         match media.kind {
             MediaKind::Photo => {
                 let mut item = InputMediaPhoto::new(InputFile::file_id(media.file_id));
+                item = item.show_caption_above_media(caption_placement.is_above_media());
                 if first {
                     if let Some(caption) = post_caption {
                         item = item
@@ -655,6 +740,7 @@ async fn handle_repost_gallery(
             MediaKind::Video => {
                 let mut item =
                     teloxide::types::InputMediaVideo::new(InputFile::file_id(media.file_id));
+                item = item.show_caption_above_media(caption_placement.is_above_media());
                 if first {
                     if let Some(caption) = post_caption {
                         item = item
@@ -696,6 +782,7 @@ pub async fn handle_repost_with_rich_caption(
     post: &reddit::Post,
     delivered: &DeliveredMessages,
     caption: Option<RichText>,
+    caption_placement: CaptionPlacement,
 ) -> Result<()> {
     match delivered {
         DeliveredMessages::Single(message_id) => {
@@ -709,12 +796,28 @@ pub async fn handle_repost_with_rich_caption(
                 });
                 handle_repost_text(db, chat_id, tg, &content).await
             } else {
-                handle_repost_media(db, chat_id, tg, *message_id, caption.as_ref()).await
+                handle_repost_media(
+                    db,
+                    chat_id,
+                    tg,
+                    *message_id,
+                    caption.as_ref(),
+                    caption_placement,
+                )
+                .await
             }
         }
         DeliveredMessages::Gallery(_) => {
             let tg_file_ids = db.get_telegram_files_for_post(&post.id, chat_id.0)?;
-            handle_repost_gallery(db, chat_id, tg, tg_file_ids, caption.as_ref()).await
+            handle_repost_gallery(
+                db,
+                chat_id,
+                tg,
+                tg_file_ids,
+                caption.as_ref(),
+                caption_placement,
+            )
+            .await
         }
     }
 }
@@ -945,6 +1048,7 @@ fn bootstrap_review_post(
         source_url: legacy_source_url(message),
         caption,
         content_kind,
+        caption_placement: CaptionPlacement::BelowMedia,
         review_message_id: message.id,
         control_message_id: message.id,
         metadata,
@@ -1029,11 +1133,27 @@ async fn publish_review(config: &config::Config, tg: &Bot, review: &ReviewPost) 
     let chat_id = ChatId(review.chat_id);
     match review.content_kind {
         ReviewContentKind::Media => {
-            handle_repost_media(db, chat_id, tg, review.review_message_id, content.as_ref()).await
+            handle_repost_media(
+                db,
+                chat_id,
+                tg,
+                review.review_message_id,
+                content.as_ref(),
+                review.caption_placement,
+            )
+            .await
         }
         ReviewContentKind::Gallery => {
             let file_ids = db.get_telegram_files_for_post(&review.post_id, review.chat_id)?;
-            handle_repost_gallery(db, chat_id, tg, file_ids, content.as_ref()).await
+            handle_repost_gallery(
+                db,
+                chat_id,
+                tg,
+                file_ids,
+                content.as_ref(),
+                review.caption_placement,
+            )
+            .await
         }
         ReviewContentKind::Text => {
             let content = content.context("text review cannot be published without content")?;
@@ -1107,6 +1227,19 @@ async fn callback_handler_inner(
             .await?;
             let answer = tg.answer_callback_query(q.id);
             if selected {
+                answer.await?;
+            } else {
+                answer
+                    .text("This older gallery is unavailable in the local database.")
+                    .await?;
+            }
+        }
+        RepostAction::ToggleCaptionPlacement => {
+            let post_id = data.post_id.context("repost callback has no post id")?;
+            let toggled =
+                toggle_caption_placement(&db, &tg, message, &post_id, data.is_gallery).await?;
+            let answer = tg.answer_callback_query(q.id);
+            if toggled {
                 answer.await?;
             } else {
                 answer
