@@ -1,4 +1,5 @@
 mod api;
+mod embed;
 #[allow(dead_code)]
 pub mod oauth;
 mod types;

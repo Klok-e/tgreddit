@@ -425,13 +425,14 @@ fn truncate_caption_for_metadata(
     truncated
 }
 
-async fn handle_new_video_post(
+pub(crate) async fn handle_new_video_post(
     config: &config::Config,
     tg: &Bot,
     chat_id: i64,
     post: &reddit::Post,
+    download_url: &str,
 ) -> Result<DeliveredMessages> {
-    let video = tokio::task::block_in_place(|| ytdlp::download(&post.url))
+    let video = tokio::task::block_in_place(|| ytdlp::download(download_url))
         .context("Failed to download video from post")?;
 
     info!("got a video: {video:?}");
@@ -816,7 +817,7 @@ pub async fn handle_new_post(
         reddit::PostType::Image => handle_new_image_post(config, tg, chat_id, &post)
             .await
             .context("Failed handling new image"),
-        reddit::PostType::Video => handle_new_video_post(config, tg, chat_id, &post)
+        reddit::PostType::Video => handle_new_video_post(config, tg, chat_id, &post, &post.url)
             .await
             .context("Failed handling new video"),
         reddit::PostType::Link => handle_new_link_post(config, tg, chat_id, &post)

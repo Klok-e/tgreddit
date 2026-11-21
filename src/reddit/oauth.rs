@@ -111,11 +111,10 @@ impl RedditOAuthTransport {
     {
         let response = self.send_authenticated(path, query).await?;
         if !response.status.is_success() {
-            return Err(RedditApiError::Transport(anyhow::anyhow!(
-                "Reddit API returned non-success status {} for path {}",
-                response.status,
-                path
-            )));
+            return Err(RedditApiError::HttpStatus {
+                status: response.status,
+                path: path.to_owned(),
+            });
         }
         serde_json::from_str(&response.body).map_err(|e| {
             RedditApiError::Transport(anyhow::Error::from(e).context(format!(
@@ -496,8 +495,14 @@ pub enum RedditApiError {
     #[error("Reddit returned 401 Unauthorized for {path} after token refresh; aborting")]
     Unauthorized { path: String },
 
+    #[error("Reddit API returned non-success status {status} for path {path}")]
+    HttpStatus {
+        status: reqwest::StatusCode,
+        path: String,
+    },
+
     /// Any other transport-level failure (DNS, TLS, connection reset,
-    /// non-2xx status, etc.). Wrapped as `anyhow::Error` so callers
+    /// etc.). Wrapped as `anyhow::Error` so callers
     /// can keep their existing error chains.
     #[error(transparent)]
     Transport(#[from] anyhow::Error),

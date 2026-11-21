@@ -1,4 +1,4 @@
-use super::oauth::RedditOAuthTransport;
+use super::oauth::{RedditApiError, RedditOAuthTransport};
 use super::*;
 use anyhow::{Context, Result};
 use log::info;
@@ -56,6 +56,45 @@ pub async fn get_subreddit_top_posts(
 
 pub async fn get_link(link_id: &str) -> Result<Post> {
     get_link_via(get_transport()?, link_id).await
+}
+
+pub struct SubmittedPost {
+    pub post: Post,
+    pub video_playlist: Option<Url>,
+}
+
+pub async fn get_submitted_post(link_id: &str, subreddit: Option<&str>) -> Result<SubmittedPost> {
+    let api_error = match get_link(link_id).await {
+        Ok(post) => {
+            return Ok(SubmittedPost {
+                post,
+                video_playlist: None,
+            });
+        }
+        Err(error) => error,
+    };
+    let Some(subreddit) = subreddit.filter(|_| {
+        matches!(
+            api_error.downcast_ref::<RedditApiError>(),
+            Some(RedditApiError::HttpStatus {
+                status: reqwest::StatusCode::FORBIDDEN,
+                ..
+            })
+        )
+    }) else {
+        return Err(api_error);
+    };
+
+    info!("Reddit API denied post {link_id}; trying its public video embed");
+    let (post, playlist) = embed::fetch_video(subreddit, link_id)
+        .await
+        .map_err(|error| {
+            api_error.context(format!("Public Reddit video embed failed: {error:#}"))
+        })?;
+    Ok(SubmittedPost {
+        post,
+        video_playlist: Some(playlist),
+    })
 }
 
 /// Like [`get_link`], but uses a caller-supplied transport instead of the

@@ -40,7 +40,7 @@ _Avoid_: Download error, failed link
 The message in the Channel Download Bot that shows the current Repost Caption, one visible link to the Reddit post, and the controls for selecting an output. Direct media submissions show their submitted URL. It remains the authoritative preview while the operator edits or confirms publication.
 
 **Source URL**:
-The one visible URL appended by the `Post (with link)` Publish Variant. For downloaded media it is the exact input used to download the media; for Reddit galleries and self-text posts it is the Reddit submission permalink.
+The one visible URL appended by the `Post (with link)` Publish Variant. Reddit galleries, self-text posts, and videos retrieved through a public Reddit embed use the Reddit submission permalink. Other downloaded media uses the URL supplied for the download.
 
 **Publish Variant**:
 The selected Repost Channel output: the current Repost Caption, media without a caption, or the current Repost Caption followed by the Source URL.

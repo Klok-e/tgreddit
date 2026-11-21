@@ -1,7 +1,8 @@
 use crate::{
     config, db,
     handle_post::{
-        DeliveredMessages, handle_new_post, handle_video_link, handle_x_tweet_link, process_post,
+        DeliveredMessages, handle_new_post, handle_new_video_post, handle_video_link,
+        handle_x_tweet_link, process_post,
     },
     messages, reddit,
     reddit::{PostType, TopPostsTimePeriod},
@@ -496,7 +497,8 @@ async fn handle_no_command(
 ) -> Result<()> {
     async fn handle(message: &Message, tg: &Arc<Bot>, config: &Arc<config::Config>) -> Result<()> {
         lazy_static! {
-            static ref RE_REDDIT: Regex = Regex::new(r"comments/(\w+)").unwrap();
+            static ref RE_REDDIT: Regex =
+                Regex::new(r"(?:r/([A-Za-z0-9_]+)/)?comments/(\w+)").unwrap();
         }
 
         let Some(text) = message.text() else {
@@ -529,11 +531,7 @@ async fn handle_no_command(
                 .await
                 .map_err(|err| direct_media_user_error(false, err))?;
         } else {
-            let Some(id) = RE_REDDIT
-                .captures(text)
-                .and_then(|captures| captures.get(1))
-                .map(|id| id.as_str())
-            else {
+            let Some(captures) = RE_REDDIT.captures(text) else {
                 tg.send_message(
                     message.chat.id,
                     "Send a Reddit post URL, X/Twitter Tweet URL, YouTube URL, or a bot command.",
@@ -541,15 +539,22 @@ async fn handle_no_command(
                 .await?;
                 return Ok(());
             };
-            let post = reddit::get_link(id)
+            let subreddit = captures.get(1).map(|subreddit| subreddit.as_str());
+            let reddit::SubmittedPost {
+                post,
+                video_playlist,
+            } = reddit::get_submitted_post(&captures[2], subreddit)
                 .await
                 .map_err(|err| user_error("The Reddit post could not be retrieved.", err))?;
             let chat_id = message.chat.id.0;
             db.record_post_seen_with_current_time(chat_id, &post)
                 .map_err(|err| user_error("The Reddit post could not be recorded.", err))?;
-            handle_new_post(config, tg, chat_id, &post)
-                .await
-                .map_err(|err| user_error("The Reddit post could not be delivered.", err))?;
+            let delivery = if let Some(playlist) = video_playlist {
+                handle_new_video_post(config, tg, chat_id, &post, playlist.as_str()).await
+            } else {
+                handle_new_post(config, tg, chat_id, &post).await
+            };
+            delivery.map_err(|err| user_error("The Reddit post could not be delivered.", err))?;
         }
 
         Ok(())

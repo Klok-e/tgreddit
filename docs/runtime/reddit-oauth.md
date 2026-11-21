@@ -15,11 +15,11 @@ headers.
 
 [redlib]: https://github.com/redlib-org/redlib
 
-The transport is the only Reddit data source. There is no HTML scraping, no
-public-Redlib-instance dependency, no headless browser, and no fallback
-chain. The Reddit JSON shape (`Post`, `ListingResponse`, gallery metadata)
-is the same one the bot has always consumed, so Telegram delivery behavior
-(image, hosted video, external link, self post, gallery) is unchanged.
+The transport serves subscriptions, subreddit validation, and post
+lookups. For a manually submitted Reddit permalink with a subreddit, an
+HTTP 403 from the post lookup triggers a request to the public Reddit embed.
+The bot reads the Reddit-hosted video playlist, title, and permalink from
+the embed and delivers the video through its regular Telegram review flow.
 
 ### Endpoints
 
@@ -122,10 +122,9 @@ should be aware of the following failure modes:
   than copying Redlib's response handling. If Reddit renames a field
   the bot relies on, the relevant fixture-based unit tests in
   `src/reddit/api.rs` will catch it without contacting Reddit.
-- **No fallback chain**: the transport is the only data source. If
-  Reddit becomes unreachable, the bot will log transport errors and
-  stop delivering posts until the next successful poll. There is no
-  HTML scraping fallback and no public-Redlib-instance fallback.
+- **Polling availability**: subscription polling and `/get` depend on the
+  OAuth transport. The public embed fallback is for manually submitted
+  Reddit-hosted video posts whose JSON lookup returns HTTP 403.
 
 ## Manual Smoke Checklist
 

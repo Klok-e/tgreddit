@@ -6,38 +6,39 @@ description = "Get the top posts of your favorite subreddits to Telegram"
 license = "MIT"
 
 [dependencies]
-anyhow = "1.0.102"
-chrono = "0.4.44"
-duct = "1.1.1"
-env_logger = "0.11.9"
+anyhow = "1.0.104"
+chrono = "0.4.45"
+duct = "1.1.2"
+env_logger = "0.11.12"
 getopts = "0.2.24"
 itertools = "0.15.0"
-lazy_static = "1.5.0"
-log = "0.4.29"
-regex = { version = "1.12.3", default-features = false, features = [
+lazy_static = "1.5.1"
+log = "0.4.35"
+regex = { version = "1.13.2", default-features = false, features = [
     "std",
     "unicode-perl",
 ] }
-rusqlite = { version = "0.40.2", features = ["chrono", "bundled"] }
-rusqlite_migration = "2.6.0"
+rusqlite = { version = "0.41.1", features = ["chrono", "bundled"] }
+rusqlite_migration = "2.7.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
-serde = { version = "1.0.144", features = ["derive"] }
-serde_derive = "1.0.144"
-serde_json = "1.0.149"
-signal-hook = "0.4.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_derive = "1.0.229"
+serde_json = "1.0.154"
+signal-hook = "0.4.6"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 teloxide = { version = "0.17.0", features = ["macros"] }
-tempfile = "3.26.0"
-thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "sync"] }
-toml = "1.1.4"
-url = "2.5.8"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync"] }
+toml = "1.2.2"
+url = "2.5.9"
 xdg = "3.0.0"
 reqwest = { version = "0.13.5", features = ["json", "query"] }
+scraper = { version = "0.29.0", default-features = false }
 
 # Use vendored openssl. We don't depend on it directly.
-openssl = { version = "0.10.75", features = ["vendored"], optional = true }
+openssl = { version = "0.10.82", features = ["vendored"], optional = true }
 
 [features]
 vendored-openssl = ["openssl"]
